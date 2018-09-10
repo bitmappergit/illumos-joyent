@@ -21,6 +21,8 @@
 /*
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ *
+ * Copyright 2018, Joyent, Inc.
  */
 
 #ifndef _SYS_NETI_H
@@ -48,6 +50,8 @@ struct msgb;	/* avoiding sys/stream.h here */
 #define	NHF_ARP		"NHF_ARP"
 #define	NHF_VND_INET	"NHF_VND_INET"
 #define	NHF_VND_INET6	"NHF_VND_INET6"
+#define	NHF_VIONA_INET	"NHF_VIONA_INET"
+#define	NHF_VIONA_INET6	"NHF_VIONA_INET6"
 
 /*
  * Event identification

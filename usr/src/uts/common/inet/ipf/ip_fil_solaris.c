@@ -92,6 +92,14 @@ static	int	ipf_hookvndl3v4_out __P((hook_event_token_t, hook_data_t,
     void *));
 static	int	ipf_hookvndl3v6_out __P((hook_event_token_t, hook_data_t,
     void *));
+static	int	ipf_hookvional3v4_in __P((hook_event_token_t, hook_data_t,
+    void *));
+static	int	ipf_hookvional3v6_in __P((hook_event_token_t, hook_data_t,
+    void *));
+static	int	ipf_hookvional3v4_out __P((hook_event_token_t, hook_data_t,
+    void *));
+static	int	ipf_hookvional3v6_out __P((hook_event_token_t, hook_data_t,
+    void *));
 extern	int	ipf_geniter __P((ipftoken_t *, ipfgeniter_t *, ipf_stack_t *));
 extern	int	ipf_frruleiter __P((void *, int, void *, ipf_stack_t *));
 
@@ -170,6 +178,16 @@ char *hook4_vnd_out =		"ipfilter_hookvndl3v4_out";
 char *hook4_vnd_out_gz =	"ipfilter_hookvndl3v4_out_gz";
 char *hook6_vnd_out =		"ipfilter_hookvndl3v6_out";
 char *hook6_vnd_out_gz =	"ipfilter_hookvndl3v6_out_gz";
+
+/* viona IPv4/v6 hook names */
+char *hook4_viona_in =		"ipfilter_hookvional3v4_in";
+char *hook4_viona_in_gz =	"ipfilter_hookvional3v4_in_gz";
+char *hook6_viona_in =		"ipfilter_hookvional3v6_in";
+char *hook6_viona_in_gz =	"ipfilter_hookvional3v6_in_gz";
+char *hook4_viona_out =		"ipfilter_hookvional3v4_out";
+char *hook4_viona_out_gz =	"ipfilter_hookvional3v4_out_gz";
+char *hook6_viona_out =		"ipfilter_hookvional3v6_out";
+char *hook6_viona_out_gz =	"ipfilter_hookvional3v6_out_gz";
 
 /* ------------------------------------------------------------------------ */
 /* Function:    ipldetach                                                   */
@@ -290,6 +308,31 @@ ipf_stack_t *ifs;
 		if (net_protocol_release(ifs->ifs_ipf_vndl3v6) != 0)
 			goto detach_failed;
 		ifs->ifs_ipf_vndl3v6 = NULL;
+	}
+
+	/*
+	 * Remove VIONA hooks
+	 */
+	if (ifs->ifs_ipf_vional3v4 != NULL) {
+		UNDO_HOOK(ifs_ipf_vional3v4, ifs_hookvional3v4_physical_in,
+		    NH_PHYSICAL_IN, ifs_ipfhookvional3v4_in);
+		UNDO_HOOK(ifs_ipf_vional3v4, ifs_hookvional3v4_physical_out,
+		    NH_PHYSICAL_OUT, ifs_ipfhookvional3v4_out);
+
+		if (net_protocol_release(ifs->ifs_ipf_vional3v4) != 0)
+			goto detach_failed;
+		ifs->ifs_ipf_vional3v4 = NULL;
+	}
+
+	if (ifs->ifs_ipf_vional3v6 != NULL) {
+		UNDO_HOOK(ifs_ipf_vional3v6, ifs_hookvional3v6_physical_in,
+		    NH_PHYSICAL_IN, ifs_ipfhookvional3v6_in);
+		UNDO_HOOK(ifs_ipf_vional3v6, ifs_hookvional3v6_physical_out,
+		    NH_PHYSICAL_OUT, ifs_ipfhookvional3v6_out);
+
+		if (net_protocol_release(ifs->ifs_ipf_vional3v6) != 0)
+			goto detach_failed;
+		ifs->ifs_ipf_vional3v6 = NULL;
 	}
 
 #undef UNDO_HOOK
@@ -530,6 +573,61 @@ ipf_stack_t *ifs;
 	    NH_PHYSICAL_OUT, ifs->ifs_ipfhookvndl3v6_out) == 0);
 	if (!ifs->ifs_hookvndl3v6_physical_out)
 		goto hookup_failed;
+
+	/*
+	 * VIONA INET hooks
+	 */
+	ifs->ifs_ipf_vional3v4 = net_protocol_lookup(id, NHF_VIONA_INET);
+	if (ifs->ifs_ipf_vional3v4 == NULL)
+		goto hookup_failed;
+
+	HOOK_INIT_GZ_BEFORE(ifs->ifs_ipfhookvional3v4_in, ipf_hookvional3v4_in,
+	    hook4_viona_in, hook4_viona_in_gz, ifs);
+	HOOK_INIT_GZ_AFTER(ifs->ifs_ipfhookvional3v4_out, ipf_hookvional3v4_out,
+	    hook4_viona_out, hook4_viona_out_gz, ifs);
+
+	if (net_hook_register(ifs->ifs_ipf_vional3v4, NH_PHYSICAL_IN,
+	    ifs->ifs_ipfhookvional3v4_in) == 0) {
+		ifs->ifs_hookvional3v4_physical_in = 1;
+	} else {
+		ifs->ifs_hookvional3v4_physical_in = 0;
+		goto hookup_failed;
+	}
+	if (net_hook_register(ifs->ifs_ipf_vional3v4, NH_PHYSICAL_OUT,
+	    ifs->ifs_ipfhookvional3v4_out) == 0) {
+		ifs->ifs_hookvional3v4_physical_out = 1;
+	} else {
+		ifs->ifs_hookvional3v4_physical_out = 0;
+		goto hookup_failed;
+	}
+
+	/*
+	 * VIONA INET6 hooks
+	 */
+	ifs->ifs_ipf_vional3v6 = net_protocol_lookup(id, NHF_VIONA_INET6);
+	if (ifs->ifs_ipf_vional3v6 == NULL)
+		goto hookup_failed;
+
+	HOOK_INIT_GZ_BEFORE(ifs->ifs_ipfhookvional3v6_in, ipf_hookvional3v6_in,
+	    hook6_viona_in, hook6_viona_in_gz, ifs);
+	HOOK_INIT_GZ_AFTER(ifs->ifs_ipfhookvional3v6_out, ipf_hookvional3v6_out,
+	    hook6_viona_out, hook6_viona_out_gz, ifs);
+
+	if (net_hook_register(ifs->ifs_ipf_vional3v6, NH_PHYSICAL_IN,
+	    ifs->ifs_ipfhookvional3v6_in) == 0) {
+		ifs->ifs_hookvional3v6_physical_in = 1;
+	} else {
+		ifs->ifs_hookvional3v6_physical_in = 0;
+		goto hookup_failed;
+	}
+	if (net_hook_register(ifs->ifs_ipf_vional3v6, NH_PHYSICAL_OUT,
+	    ifs->ifs_ipfhookvional3v6_out) == 0) {
+		ifs->ifs_hookvional3v6_physical_out = 1;
+	} else {
+		ifs->ifs_hookvional3v6_physical_out = 0;
+		goto hookup_failed;
+	}
+
 	/*
 	 * Reacquire ipf_global, now it is safe.
 	 */
@@ -2167,6 +2265,39 @@ int ipf_hookvndl3v6_out(hook_event_token_t token, hook_data_t info, void *arg)
 	return ipf_hook6_out(token, info, arg);
 }
 
+/* ------------------------------------------------------------------------ */
+/* Function:    ipf_hookvional3v{4,6}_{in,out}				    */
+/* Returns:     int - 0 == packet ok, else problem, free packet if not done */
+/* Parameters:  event(I)     - pointer to event                             */
+/*              info(I)      - pointer to hook information for firewalling  */
+/*                                                                          */
+/* The viona hooks are private hooks to ON. They represents a layer 2       */
+/* datapath generally used to implement virtual machines. The driver sends  */
+/* along L3 packets of either type IP or IPv6. The ethertype to distinguish */
+/* them is in the upper 16 bits while the remaining bits are the            */
+/* traditional packet hook flags.                                           */
+/*                                                                          */
+/* They end up calling the appropriate traditional ip hooks.                */
+/* ------------------------------------------------------------------------ */
+int ipf_hookvional3v4_in(hook_event_token_t token, hook_data_t info, void *arg)
+{
+	return ipf_hook4_in(token, info, arg);
+}
+
+int ipf_hookvional3v6_in(hook_event_token_t token, hook_data_t info, void *arg)
+{
+	return ipf_hook6_in(token, info, arg);
+}
+
+int ipf_hookvional3v4_out(hook_event_token_t token, hook_data_t info, void *arg)
+{
+	return ipf_hook4_out(token, info, arg);
+}
+
+int ipf_hookvional3v6_out(hook_event_token_t token, hook_data_t info, void *arg)
+{
+	return ipf_hook6_out(token, info, arg);
+}
 /* ------------------------------------------------------------------------ */
 /* Function:    ipf_hook4_loop_in                                           */
 /* Returns:     int - 0 == packet ok, else problem, free packet if not done */

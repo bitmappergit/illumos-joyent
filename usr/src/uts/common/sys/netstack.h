@@ -25,7 +25,7 @@
  */
 
 /*
- * Copyright (c) 2017, Joyent, Inc. All rights reserved.
+ * Copyright (c) 2018, Joyent, Inc. All rights reserved.
  */
 
 #ifndef _SYS_NETSTACK_H
@@ -89,7 +89,8 @@ typedef id_t	netstackid_t;
 #define	NS_IPNET	17
 #define	NS_ILB		18
 #define	NS_VND		19
-#define	NS_MAX		(NS_VND+1)
+#define	NS_VIONA	20
+#define	NS_MAX		(NS_VIONA+1)
 
 /*
  * State maintained for each module which tracks the state of
