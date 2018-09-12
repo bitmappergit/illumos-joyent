@@ -166,6 +166,8 @@ struct netstack {
 			struct ipsecesp_stack	*nu_ipsecesp;
 			struct ipnet_stack	*nu_ipnet;
 			struct ilb_stack	*nu_ilb;
+			struct vnd_pnsd		*nu_vnd;
+			struct viona_pnsd	*nu_viona;
 		} nu_s;
 	} netstack_u;
 #define	netstack_modules	netstack_u.nu_modules
@@ -188,6 +190,8 @@ struct netstack {
 #define	netstack_ipsecesp	netstack_u.nu_s.nu_ipsecesp
 #define	netstack_ipnet		netstack_u.nu_s.nu_ipnet
 #define	netstack_ilb		netstack_u.nu_s.nu_ilb
+#define	netstack_vnd		netstack_u.nu_s.nu_vnd
+#define	netstack_viona		netstack_u.nu_s.nu_viona
 
 	nm_state_t	netstack_m_state[NS_MAX]; /* module state */
 

@@ -231,6 +231,7 @@
 #include <sys/mac_client.h>
 #include <sys/mac_provider.h>
 #include <sys/mac_client_priv.h>
+#include <sys/neti.h>
 #include <sys/netstack.h>
 #include <sys/vlan.h>
 #include <inet/ip.h>
@@ -457,26 +458,24 @@ typedef enum viona_pnsd_flags {
 	VIONA_NS_CONDEMNED = 0x1,
 } viona_pnsd_flags_t;
 
+typedef struct viona_nethook {
+	net_handle_t		vnh_neti;
+	hook_family_t		vnh_family;
+	hook_event_t		vnh_event_in;
+	hook_event_t		vnh_event_out;
+	hook_event_token_t	vnh_token_in;
+	hook_event_token_t	vnh_token_out;
+	boolean_t		vnh_hooked;
+} viona_nethook_t;
+
 struct viona_pnsd {
 	list_node_t		vipnd_link;
 
 	zoneid_t		vipnd_zid;
 	netstackid_t		vipnd_nsid;
-	boolean_t		vipnd_hooked;
 
-	net_handle_t		vipnd_neti_v4;
-	hook_family_t		vipnd_family_v4;
-	hook_event_t		vipnd_event_in_v4;
-	hook_event_t		vipnd_event_out_v4;
-	hook_event_token_t	vipnd_token_in_v4;
-	hook_event_token_t	vipnd_token_out_v4;
-
-	net_handle_t		vipnd_neti_v6;
-	hook_family_t		vipnd_family_v6;
-	hook_event_t		vipnd_event_in_v6;
-	hook_event_t		vipnd_event_out_v6;
-	hook_event_token_t	vipnd_token_in_v6;
-	hook_event_token_t	vipnd_token_out_v6;
+	viona_nethook_t		vipnd_nhv4;
+	viona_nethook_t		vipnd_nhv6;
 
 	kmutex_t		vipnd_lock;	/* Protects remaining members */
 	kcondvar_t		vipnd_ref_change; /*  Uses vipnd_lock */
@@ -563,7 +562,6 @@ static void viona_desb_release(viona_desb_t *);
 static void viona_rx(void *, mac_resource_handle_t, mblk_t *, boolean_t);
 static void viona_tx(viona_link_t *, viona_vring_t *);
 
-static viona_pnsd_t *viona_nsd_lookup(netstackid_t);
 static viona_pnsd_t *viona_nsd_lookup_by_zid(zoneid_t);
 static void viona_nsd_rele(viona_pnsd_t *);
 
@@ -815,6 +813,7 @@ viona_close(dev_t dev, int flag, int otype, cred_t *credp)
 	}
 
 	VERIFY0(viona_ioc_delete(ss, B_TRUE));
+	VERIFY(!list_link_active(&ss->ss_node));
 	ddi_soft_state_free(viona_state, minor);
 	id_free(viona_minors, minor);
 
@@ -1108,6 +1107,7 @@ viona_ioc_delete(viona_soft_state_t *ss, boolean_t on_close)
 	mutex_enter(&nsd->vipnd_lock);
 	list_remove(&nsd->vipnd_dev_list, ss);
 	mutex_exit(&nsd->vipnd_lock);
+
 	viona_nsd_rele(nsd);
 
 	kmem_free(link, sizeof (viona_link_t));
@@ -2158,6 +2158,8 @@ viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp, boolean_t loopback)
 	mblk_t *mpdrop = NULL, **mpdrop_prevp = &mpdrop;
 	const boolean_t do_merge =
 	    ((link->l_features & VIRTIO_NET_F_MRG_RXBUF) != 0);
+	const boolean_t hooked = link->l_nsd->vipnd_nhv4.vnh_hooked ||
+		link->l_nsd->vipnd_nhv6.vnh_hooked;
 	size_t nrx = 0, ndrop = 0;
 
 	while (mp != NULL) {
@@ -2169,8 +2171,7 @@ viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp, boolean_t loopback)
 		mp->b_next = NULL;
 		size = msgsize(mp);
 
-		if (link->l_nsd->vipnd_hooked &&
-		    (err = viona_hook(link, ring, &mp, B_FALSE)) != 0)
+		if (hooked && (err = viona_hook(link, ring, &mp, B_FALSE)) != 0)
 			goto pad_drop;
 
 		/*
@@ -2538,6 +2539,8 @@ viona_tx(viona_link_t *link, viona_vring_t *ring)
 	viona_desb_t		*dp = NULL;
 	mac_client_handle_t	link_mch = link->l_mch;
 	const struct virtio_net_hdr *hdr;
+	const boolean_t hooked = link->l_nsd->vipnd_nhv4.vnh_hooked ||
+	    link->l_nsd->vipnd_nhv6.vnh_hooked;
 
 	mp_head = mp_tail = NULL;
 
@@ -2602,8 +2605,7 @@ viona_tx(viona_link_t *link, viona_vring_t *ring)
 		mp_tail = mp;
 	}
 
-	if (link->l_nsd->vipnd_hooked &&
-	    viona_hook(link, ring, &mp_head, B_TRUE) != 0)
+	if (hooked && viona_hook(link, ring, &mp_head, B_TRUE) != 0)
 		goto drop_fail;
 
 	/* Request hardware checksumming, if necessary */
@@ -2683,11 +2685,11 @@ viona_hook(viona_link_t *link, viona_vring_t *ring, mblk_t **mpp, boolean_t out)
 {
 	const char *reason = NULL;
 	viona_pnsd_t *nsd = link->l_nsd;
-	size_t offset, len;
+	viona_nethook_t *vnh = NULL;
+	size_t offset, len, minlen;
 	uint8_t *dstp;
 	uint8_t dstaddr[ETHERADDRL];
 	hook_pkt_event_t info;
-	net_handle_t neti;
 	hook_event_t he;
 	hook_event_token_t het;
 	uint16_t etype;
@@ -2716,41 +2718,34 @@ viona_hook(viona_link_t *link, viona_vring_t *ring, mblk_t **mpp, boolean_t out)
 	 */
 	switch (etype) {
 	case ETHERTYPE_IP:
-		neti = nsd->vipnd_neti_v4;
-		he = out ? nsd->vipnd_event_out_v4 : nsd->vipnd_event_in_v4;
-		het = out ? nsd->vipnd_token_out_v4 : nsd->vipnd_token_in_v4;
-
-		if (!he.he_interested)
-			return (0);
-
-		if (len < IP_SIMPLE_HDR_LENGTH) {
-			reason = "packet has incomplete IP header";
-			goto drop;
-		}
+		vnh = &nsd->vipnd_nhv4;
+		minlen = IP_SIMPLE_HDR_LENGTH;
+		reason = "packet has incomplete IP header";
 		break;
 	case ETHERTYPE_IPV6:
-		neti = nsd->vipnd_neti_v6;
-		he = out ? nsd->vipnd_event_out_v6 : nsd->vipnd_event_in_v6;
-		het = out ? nsd->vipnd_token_out_v6 : nsd->vipnd_token_in_v6;
-
-		if (!he.he_interested)
-			return (0);
-
-		if (len < IPV6_HDR_LEN) {
-			reason = "packet has incomplete IPv6 header";
-			goto drop;
-		}
+		vnh = &nsd->vipnd_nhv6;
+		minlen = IPV6_HDR_LEN;
+		reason = "packet has incomplete IPv6 header";
 		break;
 	default:
 		return (0);
 	}
+
+	he = out ? vnh->vnh_event_out : vnh->vnh_event_in;
+	het = out ? vnh->vnh_token_out : vnh->vnh_token_in;
+
+	if (!he.he_interested)
+		return (0);
+
+	if (len < minlen)
+		goto drop;
 
 	if ((dstp = viona_mb_getdstmac(*mpp, dstaddr)) == NULL) {
 		reason = "packet has incomplete ethernet header";
 		goto drop;
 	}
 
-	info.hpe_protocol = neti;
+	info.hpe_protocol = vnh->vnh_neti;
 	info.hpe_ifp = (phy_if_t)link;
 	info.hpe_ofp = (phy_if_t)link;
 	info.hpe_mp = mpp;
@@ -2773,7 +2768,7 @@ viona_hook(viona_link_t *link, viona_vring_t *ring, mblk_t **mpp, boolean_t out)
 		goto drop;
 	}
 
-	if (hook_run(neti->netd_hooks, het, (hook_data_t)&info) != 0) {
+	if (hook_run(vnh->vnh_neti->netd_hooks, het, (hook_data_t)&info) != 0) {
 		if (out) {
 			VIONA_PROBE2(tx_hook_drop, viona_vring_t *, ring,
 			    mblk_t *, *mpp);
@@ -2889,7 +2884,7 @@ viona_neti_isvchksum(net_handle_t neti __unused, mblk_t *mp __unused)
 	return (-1);
 }
 
-static net_protocol_t viona_neti_info_v4 = {
+static net_protocol_t viona_neti_v4 = {
 	NETINFO_VERSION,
 	NHF_VIONA_INET,
 	viona_neti_getifname,
@@ -2907,7 +2902,7 @@ static net_protocol_t viona_neti_info_v4 = {
 	viona_neti_isvchksum
 };
 
-static net_protocol_t viona_neti_info_v6 = {
+static net_protocol_t viona_neti_v6 = {
 	NETINFO_VERSION,
 	NHF_VIONA_INET6,
 	viona_neti_getifname,
@@ -2926,7 +2921,8 @@ static net_protocol_t viona_neti_info_v6 = {
 };
 
 static int
-viona_netinfo_init(viona_pnsd_t *nsp)
+viona_netinfo_init(netid_t nid, viona_nethook_t *vnh, char *nh_name,
+    net_protocol_t *netip)
 {
 	/*
 	 * Track how far we get during setup, used if we fail mid-way to
@@ -2934,96 +2930,46 @@ viona_netinfo_init(viona_pnsd_t *nsp)
 	 * step is commented with its corresponding step number.
 	 */
 	uint_t progress = 0;
-
-	/* 0 */
-	nsp->vipnd_neti_v4 = net_protocol_register(nsp->vipnd_nsid,
-	    &viona_neti_info_v4);
-	ASSERT(nsp->vipnd_neti_v4 != NULL);
-
-	nsp->vipnd_neti_v6 = net_protocol_register(nsp->vipnd_nsid,
-	    &viona_neti_info_v6);
-	ASSERT(nsp->vipnd_neti_v6 != NULL);
+	int ret;
 
 	/* 1 */
-	nsp->vipnd_family_v4.hf_version = HOOK_VERSION;
-	nsp->vipnd_family_v4.hf_name = "viona_inet";
-
-	if (net_family_register(nsp->vipnd_neti_v4,
-	    &nsp->vipnd_family_v4) != 0) {
-		cmn_err(CE_NOTE, "%s: net_family_register failed for stack %d",
-		    __func__, nsp->vipnd_nsid);
+	if ((vnh->vnh_neti = net_protocol_register(nid, netip)) == NULL) {
+		cmn_err(CE_NOTE, "%s: net_protocol_register failed "
+		    "(netid=%d name=%s)", __func__, nid, nh_name);
 		goto fail;
 	}
 	progress++;
 
 	/* 2 */
-	nsp->vipnd_family_v6.hf_version = HOOK_VERSION;
-	nsp->vipnd_family_v6.hf_name = "viona_inet6";
-
-	if (net_family_register(nsp->vipnd_neti_v6,
-	    &nsp->vipnd_family_v6) != 0) {
-		cmn_err(CE_NOTE, "%s: net_family_register inet6 failed for "
-		    "stack %d", __func__, nsp->vipnd_nsid);
+	HOOK_FAMILY_INIT(&vnh->vnh_family, nh_name);
+	if ((ret = net_family_register(vnh->vnh_neti, &vnh->vnh_family)) != 0) {
+		cmn_err(CE_NOTE, "%s: net_family_register failed "
+		    "(netid=%d name=%s err=%d)", __func__,
+		    nid, nh_name, ret);
 		goto fail;
 	}
 	progress++;
 
 	/* 3 */
-	nsp->vipnd_event_in_v4.he_version = HOOK_VERSION;
-	nsp->vipnd_event_in_v4.he_name = NH_PHYSICAL_IN;
-	nsp->vipnd_event_in_v4.he_flags = 0;
-	nsp->vipnd_event_in_v4.he_interested = B_FALSE;
-
-	if ((nsp->vipnd_token_in_v4 = net_event_register(nsp->vipnd_neti_v4,
-	    &nsp->vipnd_event_in_v4)) == NULL) {
-		cmn_err(CE_NOTE, "%s: net_event_register %s failed for "
-		    "stack %d", __func__, NH_PHYSICAL_IN, nsp->vipnd_nsid);
+	HOOK_EVENT_INIT(&vnh->vnh_event_in, NH_PHYSICAL_IN);
+	if ((vnh->vnh_token_in = net_event_register(vnh->vnh_neti,
+	    &vnh->vnh_event_in)) == NULL) {
+		cmn_err(CE_NOTE, "%s: net_event_register %s failed "
+		    "(netid=%d name=%s)", __func__, NH_PHYSICAL_IN, nid,
+		    nh_name);
 		goto fail;
 	}
 	progress++;
 
 	/* 4 */
-	nsp->vipnd_event_in_v6.he_version = HOOK_VERSION;
-	nsp->vipnd_event_in_v6.he_name = NH_PHYSICAL_IN;
-	nsp->vipnd_event_in_v6.he_flags = 0;
-	nsp->vipnd_event_in_v6.he_interested = B_FALSE;
-
-	if ((nsp->vipnd_token_in_v6 = net_event_register(nsp->vipnd_neti_v6,
-	    &nsp->vipnd_event_in_v6)) == NULL) {
-		cmn_err(CE_NOTE, "%s: net_event_register inet6 %s failed for "
-		    "stack %d", __func__, NH_PHYSICAL_IN, nsp->vipnd_nsid);
+	HOOK_EVENT_INIT(&vnh->vnh_event_out, NH_PHYSICAL_OUT);
+	if ((vnh->vnh_token_out = net_event_register(vnh->vnh_neti,
+	    &vnh->vnh_event_out)) == NULL) {
+		cmn_err(CE_NOTE, "%s: net_event_register %s failed "
+		    "(netid=%d name=%s)", __func__, NH_PHYSICAL_OUT, nid,
+		    nh_name);
 		goto fail;
 	}
-	progress++;
-
-	/* 5 */
-	nsp->vipnd_event_out_v4.he_version = HOOK_VERSION;
-	nsp->vipnd_event_out_v4.he_name = NH_PHYSICAL_OUT;
-	nsp->vipnd_event_out_v4.he_flags = 0;
-	nsp->vipnd_event_out_v4.he_interested = B_FALSE;
-
-	if ((nsp->vipnd_token_out_v4 = net_event_register(nsp->vipnd_neti_v4,
-	    &nsp->vipnd_event_out_v4)) == NULL) {
-		cmn_err(CE_NOTE, "%s: net_event_register %s failed for "
-		    "stack %d", __func__, NH_PHYSICAL_OUT, nsp->vipnd_nsid);
-		goto fail;
-	}
-	progress++;
-
-	/* 6 */
-	nsp->vipnd_event_out_v6.he_version = HOOK_VERSION;
-	nsp->vipnd_event_out_v6.he_name = NH_PHYSICAL_OUT;
-	nsp->vipnd_event_out_v6.he_flags = 0;
-	nsp->vipnd_event_out_v6.he_interested = B_FALSE;
-
-	if ((nsp->vipnd_token_out_v6 = net_event_register(nsp->vipnd_neti_v6,
-	    &nsp->vipnd_event_out_v6)) == NULL) {
-		cmn_err(CE_NOTE, "%s: net_event_register inet6 %s failed for "
-		    "stack %d", __func__, NH_PHYSICAL_OUT, nsp->vipnd_nsid);
-		goto fail;
-	}
-	progress++;
-
 	return (0);
 
 fail:
@@ -3036,88 +2982,55 @@ fail:
 		 */
 		cmn_err(CE_PANIC, "%s: Unhandled setup failure", __func__);
 		break;
-	case 5:
-		(void) net_event_shutdown(nsp->vipnd_neti_v4,
-		    &nsp->vipnd_event_out_v4);
-		(void) net_event_unregister(nsp->vipnd_neti_v4,
-		    &nsp->vipnd_event_out_v4);
-		/* FALLTHRU */
 	case 4:
-		(void) net_event_shutdown(nsp->vipnd_neti_v6,
-		    &nsp->vipnd_event_in_v6);
-		(void) net_event_unregister(nsp->vipnd_neti_v6,
-		    &nsp->vipnd_event_in_v6);
+		VERIFY0(net_event_shutdown(vnh->vnh_neti, &vnh->vnh_event_out));
+		VERIFY0(net_event_unregister(vnh->vnh_neti,
+		    &vnh->vnh_event_out));
+		vnh->vnh_token_out = NULL;
 		/* FALLTHRU */
 	case 3:
-		(void) net_event_shutdown(nsp->vipnd_neti_v4,
-		    &nsp->vipnd_event_in_v4);
-		(void) net_event_unregister(nsp->vipnd_neti_v4,
-		    &nsp->vipnd_event_in_v4);
+		VERIFY0(net_event_shutdown(vnh->vnh_neti, &vnh->vnh_event_in));
+		VERIFY0(net_event_unregister(vnh->vnh_neti,
+		    &vnh->vnh_event_in));
+		vnh->vnh_token_in = NULL;
 		/* FALLTHRU */
 	case 2:
-		VERIFY0(net_family_shutdown(nsp->vipnd_neti_v6,
-		    &nsp->vipnd_family_v6));
-		(void) net_family_unregister(nsp->vipnd_neti_v6,
-		    &nsp->vipnd_family_v6);
+		VERIFY0(net_family_shutdown(vnh->vnh_neti, &vnh->vnh_family));
+		VERIFY0(net_family_unregister(vnh->vnh_neti, &vnh->vnh_family));
 		/* FALLTHRU */
 	case 1:
-		VERIFY0(net_family_shutdown(nsp->vipnd_neti_v4,
-		    &nsp->vipnd_family_v4));
-		(void) net_family_unregister(nsp->vipnd_neti_v4,
-		    &nsp->vipnd_family_v4);
+		VERIFY0(net_protocol_unregister(vnh->vnh_neti));
+		vnh->vnh_neti = NULL;
 		/* FALLTHRU */
 	case 0:
-		(void) net_protocol_unregister(nsp->vipnd_neti_v4);
-		(void) net_protocol_unregister(nsp->vipnd_neti_v6);
+		break;
 	}
-
 	return (1);
 }
 
 static void
-viona_netinfo_shutdown(viona_pnsd_t *nsp)
+viona_netinfo_shutdown(viona_nethook_t *vnh)
 {
-	VERIFY0(net_event_shutdown(nsp->vipnd_neti_v4,
-	    &nsp->vipnd_event_in_v4));
-	VERIFY0(net_event_shutdown(nsp->vipnd_neti_v4,
-	    &nsp->vipnd_event_out_v4));
-
-	VERIFY0(net_event_shutdown(nsp->vipnd_neti_v6,
-	    &nsp->vipnd_event_in_v6));
-	VERIFY0(net_event_shutdown(nsp->vipnd_neti_v6,
-	    &nsp->vipnd_event_out_v6));
-
-	VERIFY0(net_family_shutdown(nsp->vipnd_neti_v4,
-	    &nsp->vipnd_family_v4));
-	VERIFY0(net_family_shutdown(nsp->vipnd_neti_v6,
-	    &nsp->vipnd_family_v6));
+	VERIFY0(net_event_shutdown(vnh->vnh_neti, &vnh->vnh_event_out));
+	VERIFY0(net_event_shutdown(vnh->vnh_neti, &vnh->vnh_event_in));
+	VERIFY0(net_family_shutdown(vnh->vnh_neti, &vnh->vnh_family));
 }
 
 static void
-viona_netinfo_fini(viona_pnsd_t *nsp)
+viona_netinfo_fini(viona_nethook_t *vnh)
 {
-	VERIFY0(net_event_unregister(nsp->vipnd_neti_v4,
-	    &nsp->vipnd_event_in_v4));
-	VERIFY0(net_event_unregister(nsp->vipnd_neti_v4,
-	    &nsp->vipnd_event_out_v4));
-	VERIFY0(net_event_unregister(nsp->vipnd_neti_v6,
-	    &nsp->vipnd_event_in_v6));
-	VERIFY0(net_event_unregister(nsp->vipnd_neti_v6,
-	    &nsp->vipnd_event_out_v6));
-	VERIFY0(net_family_unregister(nsp->vipnd_neti_v4,
-	    &nsp->vipnd_family_v4));
-	VERIFY0(net_family_unregister(nsp->vipnd_neti_v6,
-	    &nsp->vipnd_family_v6));
-	VERIFY0(net_protocol_unregister(nsp->vipnd_neti_v4));
-	VERIFY0(net_protocol_unregister(nsp->vipnd_neti_v6));
+	VERIFY0(net_event_unregister(vnh->vnh_neti, &vnh->vnh_event_out));
+	VERIFY0(net_event_unregister(vnh->vnh_neti, &vnh->vnh_event_in));
+	VERIFY0(net_family_unregister(vnh->vnh_neti, &vnh->vnh_family));
+	VERIFY0(net_protocol_unregister(vnh->vnh_neti));
+	vnh->vnh_neti = NULL;
 }
 
 static void *
 viona_stack_init(netstackid_t stackid, netstack_t *ns __unused)
 {
 	viona_pnsd_t *nsp;
-
-	cmn_err(CE_CONT, "%s: stackid=%d: enter", __func__, stackid);
+	netid_t nid;
 
 	nsp = kmem_zalloc(sizeof (*nsp), KM_SLEEP);
 	nsp->vipnd_nsid = stackid;
@@ -3127,10 +3040,16 @@ viona_stack_init(netstackid_t stackid, netstack_t *ns __unused)
 	list_create(&nsp->vipnd_dev_list, sizeof (viona_soft_state_t),
 	    offsetof(viona_soft_state_t, ss_node));
 
-	if (viona_netinfo_init(nsp) == 0)
-		nsp->vipnd_hooked = B_TRUE;
+	nid = net_getnetidbynetstackid(stackid);
+	VERIFY(nid != -1);
 
-	/* XXX: Should we fail the netstack init if the netinfo init fails? */
+	if (viona_netinfo_init(nid, &nsp->vipnd_nhv4, "viona_inet",
+	    &viona_neti_v4) == 0)
+		nsp->vipnd_nhv4.vnh_hooked = B_TRUE;
+
+	if (viona_netinfo_init(nid, &nsp->vipnd_nhv6, "viona_inet6",
+	    &viona_neti_v6) == 0)
+		nsp->vipnd_nhv6.vnh_hooked = B_TRUE;
 
 	mutex_enter(&viona_nsd_lock);
 	list_insert_tail(&viona_nsd_list, nsp);
@@ -3146,27 +3065,14 @@ viona_stack_shutdown(netstackid_t stackid __unused, void *arg)
 
 	ASSERT(nsp != NULL);
 
-	cmn_err(CE_CONT, "%s: stackid=%d: enter", __func__, stackid);
-
 	mutex_enter(&viona_nsd_lock);
 	list_remove(&viona_nsd_list, nsp);
 	mutex_exit(&viona_nsd_lock);
 
-	if (nsp->vipnd_hooked)
-		viona_netinfo_shutdown(nsp);
-
-	/*
-	 * Since viona instances are currently only created by the
-	 * bhyve command, and should never outlive the lifetime of the
-	 * bhyve process instance that created them, a given viona instance
-	 * should never be around by the time we get to tearing down it's
-	 * netstack instance.  We still mark the viona netstack data as
-	 * condemned for diagnostic purposes, even though we should never
-	 * encounter a condemned one.
-	 */
-	mutex_enter(&nsp->vipnd_lock);
-	nsp->vipnd_flags |= VIONA_NS_CONDEMNED;
-	mutex_exit(&nsp->vipnd_lock);
+	if (nsp->vipnd_nhv4.vnh_hooked)
+		viona_netinfo_shutdown(&nsp->vipnd_nhv4);
+	if (nsp->vipnd_nhv6.vnh_hooked)
+		viona_netinfo_shutdown(&nsp->vipnd_nhv6);
 }
 
 static void
@@ -3176,40 +3082,19 @@ viona_stack_destroy(netstackid_t stackid __unused, void *arg)
 
 	ASSERT(nsp != NULL);
 
-	cmn_err(CE_CONT, "%s: stackid=%d: enter", __func__, stackid);
-
 	mutex_enter(&nsp->vipnd_lock);
 	while (nsp->vipnd_ref != 0)
 		cv_wait(&nsp->vipnd_ref_change, &nsp->vipnd_lock);
 	mutex_exit(&nsp->vipnd_lock);
 
-	if (nsp->vipnd_hooked)
-		viona_netinfo_fini(nsp);
+	if (nsp->vipnd_nhv4.vnh_hooked)
+		viona_netinfo_fini(&nsp->vipnd_nhv4);
+	if (nsp->vipnd_nhv6.vnh_hooked)
+		viona_netinfo_fini(&nsp->vipnd_nhv6);
 
 	mutex_destroy(&nsp->vipnd_lock);
 	list_destroy(&nsp->vipnd_dev_list);
 	kmem_free(nsp, sizeof (*nsp));
-}
-
-static viona_pnsd_t *
-viona_nsd_lookup(netstackid_t nsid)
-{
-	viona_pnsd_t *nsp;
-
-	mutex_enter(&viona_nsd_lock);
-	for (nsp = list_head(&viona_nsd_list); nsp != NULL;
-	    nsp = list_next(&viona_nsd_list, nsp)) {
-		if (nsp->vipnd_nsid == nsid) {
-			mutex_enter(&nsp->vipnd_lock);
-			VERIFY3S(nsp->vipnd_ref, >=, 0);
-			nsp->vipnd_ref++;
-			mutex_exit(&nsp->vipnd_lock);
-			break;
-		}
-	}
-
-	mutex_exit(&viona_nsd_lock);
-	return (nsp);
 }
 
 static viona_pnsd_t *
@@ -3221,7 +3106,12 @@ viona_nsd_lookup_by_zid(zoneid_t zid)
 	ns = netstack_find_by_zoneid(zid);
 	if (ns == NULL)
 		return (NULL);
-	nsp = viona_nsd_lookup(ns->netstack_stackid);
+
+	nsp = ns->netstack_viona;
+	mutex_enter(&nsp->vipnd_lock);
+	nsp->vipnd_ref++;
+	mutex_exit(&nsp->vipnd_lock);
+
 	netstack_rele(ns);
 	return (nsp);
 }
