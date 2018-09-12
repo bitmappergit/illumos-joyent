@@ -3055,10 +3055,14 @@ fail:
 		    &nsp->vipnd_event_in_v4);
 		/* FALLTHRU */
 	case 2:
+		VERIFY0(net_family_shutdown(nsp->vipnd_neti_v6,
+		    &nsp->vipnd_family_v6));
 		(void) net_family_unregister(nsp->vipnd_neti_v6,
 		    &nsp->vipnd_family_v6);
 		/* FALLTHRU */
 	case 1:
+		VERIFY0(net_family_shutdown(nsp->vipnd_neti_v4,
+		    &nsp->vipnd_family_v4));
 		(void) net_family_unregister(nsp->vipnd_neti_v4,
 		    &nsp->vipnd_family_v4);
 		/* FALLTHRU */
@@ -3077,10 +3081,16 @@ viona_netinfo_shutdown(viona_pnsd_t *nsp)
 	    &nsp->vipnd_event_in_v4));
 	VERIFY0(net_event_shutdown(nsp->vipnd_neti_v4,
 	    &nsp->vipnd_event_out_v4));
+
 	VERIFY0(net_event_shutdown(nsp->vipnd_neti_v6,
 	    &nsp->vipnd_event_in_v6));
 	VERIFY0(net_event_shutdown(nsp->vipnd_neti_v6,
 	    &nsp->vipnd_event_out_v6));
+
+	VERIFY0(net_family_shutdown(nsp->vipnd_neti_v4,
+	    &nsp->vipnd_family_v4));
+	VERIFY0(net_family_shutdown(nsp->vipnd_neti_v6,
+	    &nsp->vipnd_family_v6));
 }
 
 static void
