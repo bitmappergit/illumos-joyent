@@ -22,7 +22,7 @@
  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  *
- * Copyright 2013 Joyent, Inc.  All rights reserved.
+ * Copyright 2018 Joyent, Inc.  All rights reserved.
  * Copyright (c) 2016 by Delphix. All rights reserved.
  */
 #include <sys/param.h>
@@ -1035,7 +1035,7 @@ hook_family_free(hook_family_int_t *hfi, hook_stack_t *hks)
 	/* Free container */
 	kmem_free(hfi, sizeof (*hfi));
 
-	if (hks->hks_shutdown == 2)
+	if (hks != NULL && hks->hks_shutdown == 2)
 		hook_stack_remove(hks);
 
 	mutex_exit(&hook_stack_lock);
