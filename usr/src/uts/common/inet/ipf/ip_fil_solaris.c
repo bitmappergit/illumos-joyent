@@ -103,6 +103,11 @@ static	int	ipf_hookvional3v6_out __P((hook_event_token_t, hook_data_t,
 extern	int	ipf_geniter __P((ipftoken_t *, ipfgeniter_t *, ipf_stack_t *));
 extern	int	ipf_frruleiter __P((void *, int, void *, ipf_stack_t *));
 
+static int ipf_hook_protocol_notify(hook_notify_cmd_t, void *, const char *,
+    const char *, const char *);
+static int ipf_hook_instance_notify(hook_notify_cmd_t, void *, const char *,
+    const char *, const char *);
+
 #if SOLARIS2 < 10
 #if SOLARIS2 >= 7
 u_int		*ip_ttl_ptr = NULL;
@@ -179,7 +184,7 @@ char *hook4_vnd_out_gz =	"ipfilter_hookvndl3v4_out_gz";
 char *hook6_vnd_out =		"ipfilter_hookvndl3v6_out";
 char *hook6_vnd_out_gz =	"ipfilter_hookvndl3v6_out_gz";
 
-/* viona IPv4/v6 hook names */
+/* viona IPv4/IPv6 hook names */
 char *hook4_viona_in =		"ipfilter_hookvional3v4_in";
 char *hook4_viona_in_gz =	"ipfilter_hookvional3v4_in_gz";
 char *hook6_viona_in =		"ipfilter_hookvional3v6_in";
@@ -203,7 +208,6 @@ char *hook6_viona_out_gz =	"ipfilter_hookvional3v6_out_gz";
 int ipldetach(ifs)
 ipf_stack_t *ifs;
 {
-
 	ASSERT(RW_WRITE_HELD(&ifs->ifs_ipf_global.ipf_lk));
 
 #if SOLARIS2 < 10
@@ -313,29 +317,33 @@ ipf_stack_t *ifs;
 	/*
 	 * Remove VIONA hooks
 	 */
-	if (ifs->ifs_ipf_vional3v4 != NULL) {
-		UNDO_HOOK(ifs_ipf_vional3v4, ifs_hookvional3v4_physical_in,
-		    NH_PHYSICAL_IN, ifs_ipfhookvional3v4_in);
-		UNDO_HOOK(ifs_ipf_vional3v4, ifs_hookvional3v4_physical_out,
-		    NH_PHYSICAL_OUT, ifs_ipfhookvional3v4_out);
+	net_instance_notify_unregister(ifs->ifs_netid,
+	    ipf_hook_instance_notify);
 
-		if (net_protocol_release(ifs->ifs_ipf_vional3v4) != 0)
-			goto detach_failed;
-		ifs->ifs_ipf_vional3v4 = NULL;
+	/*
+	 * Normally, viona will unregister itself before ipldetach() is called,
+	 * so these will be no-ops, but out of caution, we try to make sure
+	 * we've removed any of our references.
+	 */
+	(void) ipf_hook_protocol_notify(HN_UNREGISTER, ifs, Hn_VIONA, NULL,
+	    NH_PHYSICAL_IN);
+	(void) ipf_hook_protocol_notify(HN_UNREGISTER, ifs, Hn_VIONA, NULL,
+	    NH_PHYSICAL_OUT);
+	(void) ipf_hook_protocol_notify(HN_UNREGISTER, ifs, Hn_VIONA6, NULL,
+	    NH_PHYSICAL_IN);
+	(void) ipf_hook_protocol_notify(HN_UNREGISTER, ifs, Hn_VIONA6, NULL,
+	    NH_PHYSICAL_OUT);
+
+	{
+		char netidstr[12]; /* Large enough for INT_MAX + NUL */
+		(void) snprintf(netidstr, sizeof (netidstr), "%d",
+		    ifs->ifs_netid);
+
+		(void) ipf_hook_instance_notify(HN_UNREGISTER, ifs, netidstr,
+		    NULL, Hn_VIONA);
+		(void) ipf_hook_instance_notify(HN_UNREGISTER, ifs, netidstr,
+		    NULL, Hn_VIONA6);
 	}
-
-	if (ifs->ifs_ipf_vional3v6 != NULL) {
-		UNDO_HOOK(ifs_ipf_vional3v6, ifs_hookvional3v6_physical_in,
-		    NH_PHYSICAL_IN, ifs_ipfhookvional3v6_in);
-		UNDO_HOOK(ifs_ipf_vional3v6, ifs_hookvional3v6_physical_out,
-		    NH_PHYSICAL_OUT, ifs_ipfhookvional3v6_out);
-
-		if (net_protocol_release(ifs->ifs_ipf_vional3v6) != 0)
-			goto detach_failed;
-		ifs->ifs_ipf_vional3v6 = NULL;
-	}
-
-#undef UNDO_HOOK
 
 #ifdef	IPFDEBUG
 	cmn_err(CE_CONT, "ipldetach()\n");
@@ -577,56 +585,9 @@ ipf_stack_t *ifs;
 	/*
 	 * VIONA INET hooks
 	 */
-	ifs->ifs_ipf_vional3v4 = net_protocol_lookup(id, NHF_VIONA_INET);
-	if (ifs->ifs_ipf_vional3v4 == NULL)
+	if (net_instance_notify_register(id, ipf_hook_instance_notify,
+	    ifs) != 0)
 		goto hookup_failed;
-
-	HOOK_INIT_GZ_BEFORE(ifs->ifs_ipfhookvional3v4_in, ipf_hookvional3v4_in,
-	    hook4_viona_in, hook4_viona_in_gz, ifs);
-	HOOK_INIT_GZ_AFTER(ifs->ifs_ipfhookvional3v4_out, ipf_hookvional3v4_out,
-	    hook4_viona_out, hook4_viona_out_gz, ifs);
-
-	if (net_hook_register(ifs->ifs_ipf_vional3v4, NH_PHYSICAL_IN,
-	    ifs->ifs_ipfhookvional3v4_in) == 0) {
-		ifs->ifs_hookvional3v4_physical_in = 1;
-	} else {
-		ifs->ifs_hookvional3v4_physical_in = 0;
-		goto hookup_failed;
-	}
-	if (net_hook_register(ifs->ifs_ipf_vional3v4, NH_PHYSICAL_OUT,
-	    ifs->ifs_ipfhookvional3v4_out) == 0) {
-		ifs->ifs_hookvional3v4_physical_out = 1;
-	} else {
-		ifs->ifs_hookvional3v4_physical_out = 0;
-		goto hookup_failed;
-	}
-
-	/*
-	 * VIONA INET6 hooks
-	 */
-	ifs->ifs_ipf_vional3v6 = net_protocol_lookup(id, NHF_VIONA_INET6);
-	if (ifs->ifs_ipf_vional3v6 == NULL)
-		goto hookup_failed;
-
-	HOOK_INIT_GZ_BEFORE(ifs->ifs_ipfhookvional3v6_in, ipf_hookvional3v6_in,
-	    hook6_viona_in, hook6_viona_in_gz, ifs);
-	HOOK_INIT_GZ_AFTER(ifs->ifs_ipfhookvional3v6_out, ipf_hookvional3v6_out,
-	    hook6_viona_out, hook6_viona_out_gz, ifs);
-
-	if (net_hook_register(ifs->ifs_ipf_vional3v6, NH_PHYSICAL_IN,
-	    ifs->ifs_ipfhookvional3v6_in) == 0) {
-		ifs->ifs_hookvional3v6_physical_in = 1;
-	} else {
-		ifs->ifs_hookvional3v6_physical_in = 0;
-		goto hookup_failed;
-	}
-	if (net_hook_register(ifs->ifs_ipf_vional3v6, NH_PHYSICAL_OUT,
-	    ifs->ifs_ipfhookvional3v6_out) == 0) {
-		ifs->ifs_hookvional3v6_physical_out = 1;
-	} else {
-		ifs->ifs_hookvional3v6_physical_out = 0;
-		goto hookup_failed;
-	}
 
 	/*
 	 * Reacquire ipf_global, now it is safe.
@@ -689,6 +650,223 @@ ipf_stack_t *ifs;
 hookup_failed:
 	WRITE_ENTER(&ifs->ifs_ipf_global);
 	return -1;
+}
+
+static const char *
+hook_cmd_str(hook_notify_cmd_t command)
+{
+	switch (command) {
+	case HN_NONE:
+		return ("HN_NONE");
+	case HN_REGISTER:
+		return ("HN_REGISTER");
+	case HN_UNREGISTER:
+		return ("HN_UNREGISTER");
+	default:
+		return ("UNKNOWN");
+	}
+}
+
+/* ------------------------------------------------------------------------ */
+/*
+ * Called whenever a nethook protocol is registered or unregistered.  Currently
+ * only used to add or remove the hooks for viona.
+ *
+ * While the function signature requires returning int, nothing
+ * in usr/src/uts/common/io/hook.c that invokes the callbacks
+ * captures the return value (nor is there currently any documentation
+ * on what return values should be).  For now at least, we'll return 0
+ * on success (or 'not applicable') or an error value.  Even if the
+ * nethook framework doesn't use the return address, it can be observed via
+ * dtrace if needed.
+ */
+static int
+ipf_hook_protocol_notify(hook_notify_cmd_t command, void *arg,
+    const char *name, const char *dummy __unused, const char *he_name)
+{
+	ipf_stack_t *ifs = arg;
+	net_handle_t neth;
+	hook_t **hookpp;
+	char *hook_name, *hint_name;
+	hook_func_t hookfn;
+	boolean_t *hookedp;
+	hook_hint_t hint;
+	boolean_t v6, out;
+	int ret = 0;
+
+	cmn_err(CE_NOTE, "%s: command=%s (%d) name=%s he_name=%s ipf_stack=%d%s",
+	    __func__, hook_cmd_str(command), command, name,
+	    he_name, ifs->ifs_netid,
+	    ifs->ifs_gz_controlled ? " (GZ)" : "");
+
+	const boolean_t gz = ifs->ifs_gz_controlled;
+
+	if (strcmp(name, Hn_VIONA) == 0) {
+		v6 = B_FALSE;
+	} else if (strcmp(name, Hn_VIONA6) == 0) {
+		v6 = B_TRUE;
+	} else {
+		cmn_err(CE_NOTE, "%s: unhandled protocol %s", __func__, name);
+		return (0);
+	}
+
+	if (strcmp(he_name, NH_PHYSICAL_IN) == 0) {
+		out = B_FALSE;
+	} else if (strcmp(he_name, NH_PHYSICAL_OUT) == 0) {
+		out = B_TRUE;
+	} else {
+		cmn_err(CE_NOTE, "%s: unhandled hook event %s", __func__,
+		    he_name);
+		return (0);
+	}
+
+	/*
+	 * If we expand this beyond viona support (e.g. vnd), we'll probably
+	 * want an nicer way to set all these values.
+	 */
+	if (v6) {
+		neth = ifs->ifs_ipf_vional3v6;
+		if (out) {
+			hookpp = &ifs->ifs_ipfhookvional3v6_out;
+			hookfn = ipf_hookvional3v6_out;
+			hookedp = &ifs->ifs_hookvional3v6_physical_out;
+			name = gz ? hook6_viona_out_gz : hook6_viona_out;
+			hint = gz ? HH_AFTER : HH_BEFORE;
+			hint_name = gz ? hook6_viona_out : hook6_viona_out_gz;
+		} else {
+			hookpp = &ifs->ifs_ipfhookvional3v6_in;
+			hookfn = ipf_hookvional3v6_in;
+			hookedp = &ifs->ifs_hookvional3v6_physical_in;
+			name = gz ? hook6_viona_in_gz : hook6_viona_in;
+			hint = gz ? HH_BEFORE : HH_AFTER;
+			hint_name = gz ? hook6_viona_in : hook6_viona_in_gz;
+		}
+	} else {
+		neth = ifs->ifs_ipf_vional3v4;
+		if (out) {
+			hookpp = &ifs->ifs_ipfhookvional3v4_out;
+			hookfn = ipf_hookvional3v4_out;
+			hookedp = &ifs->ifs_hookvional3v4_physical_out;
+			name = gz ? hook4_viona_out_gz : hook4_viona_out;
+			hint = gz ? HH_AFTER : HH_BEFORE;
+			hint_name = gz ? hook4_viona_out : hook4_viona_out_gz;
+		} else {
+			hookpp = &ifs->ifs_ipfhookvional3v4_in;
+			hookfn = ipf_hookvional3v4_in;
+			hookedp = &ifs->ifs_hookvional3v4_physical_in;
+			name = gz ? hook4_viona_in_gz : hook4_viona_in;
+			hint = gz ? HH_BEFORE : HH_AFTER;
+			hint_name = gz ? hook4_viona_in : hook4_viona_in_gz;
+		}
+	}
+
+	switch (command) {
+	default:
+	case HN_NONE:
+		break;
+	case HN_REGISTER:
+		HOOK_INIT(*hookpp, hookfn, (char *)name, ifs);
+		(*hookpp)->h_hint = hint;
+		(*hookpp)->h_hintvalue = (uintptr_t)hint_name;
+		ret = net_hook_register(neth, (char *)he_name, *hookpp);
+		if (ret != 0) {
+			cmn_err(CE_NOTE, "%s: could not register hook "
+			    "(hook family=%s hook=%s) err=%d", __func__,
+			    name, he_name, ret);
+			*hookedp = B_FALSE;
+			return (ret);
+		}
+		*hookedp = B_TRUE;
+		break;
+	case HN_UNREGISTER:
+		if (neth == NULL)
+			break;
+
+		ret = *hookedp ? net_hook_unregister(neth, (char *)he_name,
+		    *hookpp) : 0;
+		if ((ret == 0 || ret == ENXIO)) {
+			if (*hookpp != NULL) {
+				hook_free(*hookpp);
+				*hookpp = NULL;
+			}
+			*hookedp = B_FALSE;
+		}
+		break;
+	}
+
+	return (ret);
+}
+
+/*
+ * Called whenever a new nethook instance is created.  Currently only used
+ * with the Hn_VIONA and Hn_VIONA6 nethook instances.  Similar to
+ * ipf_hook_protocol_notify, the out function signature must return an int,
+ * though the result is never used.  We elect to return 0 on success (or
+ * not applicable) or a non-zero value on error.
+ */
+static int
+ipf_hook_instance_notify(hook_notify_cmd_t command, void *arg __unused,
+    const char *netid, const char *dummy __unused, const char *instance)
+{
+	ipf_stack_t *ifs = arg;
+	net_handle_t *nethp;
+	const char *nhf_name;
+	boolean_t v6;
+	int ret;
+
+	cmn_err(CE_NOTE, "%s: command=%s (%d) netid=%s instance=%s", __func__,
+	    hook_cmd_str(command), command, netid, instance);
+
+	if (strcmp(instance, Hn_VIONA) == 0) {
+		v6 = B_FALSE;
+		nethp = &ifs->ifs_ipf_vional3v4;
+		nhf_name = NHF_VIONA_INET;
+	} else if (strcmp(instance, Hn_VIONA6) == 0) {
+		v6 = B_TRUE;
+		nethp = &ifs->ifs_ipf_vional3v6;
+		nhf_name = NHF_VIONA_INET6;
+	} else {
+		return (0);
+	}
+
+	switch (command) {
+	case HN_NONE:
+	default:
+		return (0);
+	case HN_REGISTER:
+		*nethp = net_protocol_lookup(ifs->ifs_netid, nhf_name);
+		if (*nethp == NULL)
+			return (EPROTONOSUPPORT); /* XXX: Better value? */
+		ret = net_protocol_notify_register(*nethp,
+		    ipf_hook_protocol_notify, ifs);
+		if (ret != 0) {
+			/*
+			 * XXX: This probably needs more work.  If we get here,
+			 * we cannot firewall the bhyve VM being started.  At
+			 * minimum, it'd be nice if there was a way to abort
+			 * the zone startup, but there's nothing obvious.
+			 */
+			cmn_err(CE_WARN,
+			    "Could not register nethook protocol callback for "
+			    "protocol %s in zoneid %d (err=%d).", instance,
+			    ifs->ifs_zone, ret);
+		}
+		break;
+	case HN_UNREGISTER:
+		if (*nethp == NULL)
+			break;
+		ret = net_protocol_notify_unregister(*nethp,
+		    ipf_hook_protocol_notify);
+		if (ret != 0) {
+		}
+		ret = net_protocol_release(*nethp);
+		if (ret != 0) {
+		}
+		*nethp = NULL;
+		break;
+	}
+
+	return (ret);
 }
 
 static	int	fr_setipfloopback(set, ifs)

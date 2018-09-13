@@ -209,6 +209,8 @@ typedef struct hook_stack_head hook_stack_head_t;
 #define	Hn_ARP	"arp"
 #define	Hn_IPV4	"inet"
 #define	Hn_IPV6	"inet6"
+#define	Hn_VIONA "viona_inet"
+#define	Hn_VIONA6 "viona_inet6"
 
 extern int hook_run(hook_family_int_t *, hook_event_token_t, hook_data_t);
 extern int hook_register(hook_family_int_t *, char *, hook_t *);

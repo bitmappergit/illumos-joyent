@@ -125,10 +125,12 @@ struct ipf_stack {
 	hook_t		*ifs_ipfhook6_loop_in;
 	hook_t		*ifs_ipfhook6_loop_out;
 	hook_t		*ifs_ipfhook6_nicevents;
+
 	hook_t		*ifs_ipfhookvndl3v4_in;
 	hook_t		*ifs_ipfhookvndl3v6_in;
 	hook_t		*ifs_ipfhookvndl3v4_out;
 	hook_t		*ifs_ipfhookvndl3v6_out;
+
 	hook_t		*ifs_ipfhookvional3v4_in;
 	hook_t		*ifs_ipfhookvional3v6_in;
 	hook_t		*ifs_ipfhookvional3v4_out;
