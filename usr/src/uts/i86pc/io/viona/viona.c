@@ -232,7 +232,6 @@
 #include <sys/mac_provider.h>
 #include <sys/mac_client_priv.h>
 #include <sys/neti.h>
-#include <sys/netstack.h>
 #include <sys/vlan.h>
 #include <inet/ip.h>
 #include <inet/ip6.h>
@@ -349,8 +348,8 @@ struct viona_link;
 typedef struct viona_link viona_link_t;
 struct viona_desb;
 typedef struct viona_desb viona_desb_t;
-struct viona_psnd;
-typedef struct viona_pnsd viona_pnsd_t;
+struct viona_net;
+typedef struct viona_neti viona_neti_t;
 
 enum viona_ring_state {
 	VRS_RESET	= 0x0,	/* just allocated or reset */
@@ -451,12 +450,8 @@ struct viona_link {
 
 	pollhead_t		l_pollhead;
 
-	viona_pnsd_t		*l_nsd;
+	viona_neti_t		*l_neti;
 };
-
-typedef enum viona_pnsd_flags {
-	VIONA_NS_CONDEMNED = 0x1,
-} viona_pnsd_flags_t;
 
 typedef struct viona_nethook {
 	net_handle_t		vnh_neti;
@@ -468,20 +463,19 @@ typedef struct viona_nethook {
 	boolean_t		vnh_hooked;
 } viona_nethook_t;
 
-struct viona_pnsd {
-	list_node_t		vipnd_link;
+struct viona_neti {
+	list_node_t		vni_node;
 
-	zoneid_t		vipnd_zid;
-	netstackid_t		vipnd_nsid;
+	netid_t			vni_netid;
+	zoneid_t		vni_zid;
 
-	viona_nethook_t		vipnd_nhv4;
-	viona_nethook_t		vipnd_nhv6;
+	viona_nethook_t		vni_nhv4;
+	viona_nethook_t		vni_nhv6;
 
-	kmutex_t		vipnd_lock;	/* Protects remaining members */
-	kcondvar_t		vipnd_ref_change; /*  Uses vipnd_lock */
-	int			vipnd_ref;	/* Protected by vipnd_lock */
-	viona_pnsd_flags_t	vipnd_flags;	/* Protected by vipnd_lock */
-	list_t			vipnd_dev_list;	/* Protected by vipnd_lock */
+	kmutex_t		vni_lock;	/* Protects remaining members */
+	kcondvar_t		vni_ref_change; /* Protected by vni_lock */
+	int			vni_ref;	/* Protected by vni_lock */
+	list_t			vni_dev_list;	/* Protected by vni_lock */
 };
 
 struct viona_desb {
@@ -509,10 +503,16 @@ static id_space_t		*viona_minors;
 static mblk_t			*viona_vlan_pad_mp;
 
 /*
- * viona_nsd_lock protects adding/removing entries from viona_nsd_list
+ * Global linked list of viona_neti_t's.  Access is protected by viona_neti_lock
  */
-static kmutex_t			viona_nsd_lock;
-static list_t			viona_nsd_list;
+static kmutex_t			viona_neti_lock;
+static list_t			viona_neti_list;
+
+/*
+ * viona_neti is allocated and initialized during attach, and read-only
+ * until detach (where it's also freed)
+ */
+static net_instance_t		*viona_neti;
 
 /*
  * copy tx mbufs from virtio ring to avoid necessitating a wait for packet
@@ -562,12 +562,12 @@ static void viona_desb_release(viona_desb_t *);
 static void viona_rx(void *, mac_resource_handle_t, mblk_t *, boolean_t);
 static void viona_tx(viona_link_t *, viona_vring_t *);
 
-static viona_pnsd_t *viona_nsd_lookup_by_zid(zoneid_t);
-static void viona_nsd_rele(viona_pnsd_t *);
+static viona_neti_t *viona_neti_lookup_by_zid(zoneid_t);
+static void viona_neti_rele(viona_neti_t *);
 
-static void *viona_stack_init(netstackid_t, netstack_t *);
-static void viona_stack_shutdown(netstackid_t, void *);
-static void viona_stack_destroy(netstackid_t, void *);
+static void *viona_neti_create(const netid_t);
+static void viona_neti_shutdown(const netid_t, void *);
+static void viona_neti_destroy(const netid_t, void *);
 
 static int viona_hook(viona_link_t *, viona_vring_t *, mblk_t **, boolean_t);
 
@@ -709,10 +709,6 @@ viona_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	viona_minors = id_space_create("viona_minors",
 	    VIONA_CTL_MINOR + 1, UINT16_MAX);
 
-	mutex_init(&viona_nsd_lock, NULL, MUTEX_DRIVER, NULL);
-	list_create(&viona_nsd_list, sizeof (viona_pnsd_t),
-	    offsetof(viona_pnsd_t, vipnd_link));
-
 	/* Create mblk for padding when VLAN tags are stripped */
 	mp = allocb_wait(VLAN_TAGSZ, BPRI_HI, STR_NOSIG, NULL);
 	bzero(mp->b_rptr, VLAN_TAGSZ);
@@ -723,8 +719,18 @@ viona_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	viona_dip = dip;
 	ddi_report_dev(viona_dip);
 
-	netstack_register(NS_VIONA, viona_stack_init, viona_stack_shutdown,
-	    viona_stack_destroy);
+	mutex_init(&viona_neti_lock, NULL, MUTEX_DRIVER, NULL);
+	list_create(&viona_neti_list, sizeof (viona_neti_t),
+	    offsetof(viona_neti_t, vni_node));
+
+	viona_neti = net_instance_alloc(NETINFO_VERSION);
+	VERIFY(viona_neti != NULL);
+
+	viona_neti->nin_name = "viona";
+	viona_neti->nin_create = viona_neti_create;
+	viona_neti->nin_shutdown = viona_neti_shutdown;
+	viona_neti->nin_destroy = viona_neti_destroy;
+	VERIFY3S(net_instance_register(viona_neti), ==, DDI_SUCCESS);
 
 	return (DDI_SUCCESS);
 }
@@ -738,11 +744,6 @@ viona_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		return (DDI_FAILURE);
 	}
 
-	netstack_unregister(NS_VIONA);
-
-	list_destroy(&viona_nsd_list);
-	mutex_destroy(&viona_nsd_lock);
-
 	/* Clean up the VLAN padding mblk */
 	mp = viona_vlan_pad_mp;
 	viona_vlan_pad_mp = NULL;
@@ -752,6 +753,13 @@ viona_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	id_space_destroy(viona_minors);
 	ddi_remove_minor_node(viona_dip, NULL);
 	viona_dip = NULL;
+
+	net_instance_unregister(viona_neti);
+	net_instance_free(viona_neti);
+	viona_neti = NULL;
+
+	list_destroy(&viona_neti_list);
+	mutex_destroy(&viona_neti_lock);
 
 	return (DDI_SUCCESS);
 }
@@ -957,7 +965,7 @@ viona_ioc_create(viona_soft_state_t *ss, void *dptr, int md, cred_t *cr)
 	int		err = 0;
 	file_t		*fp;
 	vmm_hold_t	*hold = NULL;
-	viona_pnsd_t	*nsp = NULL;
+	viona_neti_t	*nip = NULL;
 	zoneid_t	zid;
 
 	ASSERT(MUTEX_NOT_HELD(&ss->ss_lock));
@@ -967,15 +975,15 @@ viona_ioc_create(viona_soft_state_t *ss, void *dptr, int md, cred_t *cr)
 	}
 
 	zid = crgetzoneid(cr);
-	nsp = viona_nsd_lookup_by_zid(zid);
-	if (nsp == NULL) {
+	nip = viona_neti_lookup_by_zid(zid);
+	if (nip == NULL) {
 		return (EIO);
 	}
 
 	mutex_enter(&ss->ss_lock);
 	if (ss->ss_link != NULL) {
 		mutex_exit(&ss->ss_lock);
-		viona_nsd_rele(nsp);
+		viona_neti_rele(nip);
 		return (EEXIST);
 	}
 
@@ -1007,7 +1015,7 @@ viona_ioc_create(viona_soft_state_t *ss, void *dptr, int md, cred_t *cr)
 		goto bail;
 	}
 
-	link->l_nsd = nsp;
+	link->l_neti = nip;
 
 	viona_ring_alloc(link, &link->l_vrings[VIONA_VQ_RX]);
 	viona_ring_alloc(link, &link->l_vrings[VIONA_VQ_TX]);
@@ -1015,9 +1023,9 @@ viona_ioc_create(viona_soft_state_t *ss, void *dptr, int md, cred_t *cr)
 
 	mutex_exit(&ss->ss_lock);
 
-	mutex_enter(&nsp->vipnd_lock);
-	list_insert_tail(&nsp->vipnd_dev_list, ss);
-	mutex_exit(&nsp->vipnd_lock);
+	mutex_enter(&nip->vni_lock);
+	list_insert_tail(&nip->vni_dev_list, ss);
+	mutex_exit(&nip->vni_lock);
 
 	return (0);
 
@@ -1034,7 +1042,7 @@ bail:
 	if (hold != NULL) {
 		vmm_drv_rele(hold);
 	}
-	viona_nsd_rele(nsp);
+	viona_neti_rele(nip);
 
 	mutex_exit(&ss->ss_lock);
 	return (err);
@@ -1044,7 +1052,7 @@ static int
 viona_ioc_delete(viona_soft_state_t *ss, boolean_t on_close)
 {
 	viona_link_t *link;
-	viona_pnsd_t *nsd = NULL;
+	viona_neti_t *nip = NULL;
 
 	mutex_enter(&ss->ss_lock);
 	if ((link = ss->ss_link) == NULL) {
@@ -1095,8 +1103,8 @@ viona_ioc_delete(viona_soft_state_t *ss, boolean_t on_close)
 		link->l_vm_hold = NULL;
 	}
 
-	nsd = link->l_nsd;
-	link->l_nsd = NULL;
+	nip = link->l_neti;
+	link->l_neti = NULL;
 
 	viona_ring_free(&link->l_vrings[VIONA_VQ_RX]);
 	viona_ring_free(&link->l_vrings[VIONA_VQ_TX]);
@@ -1104,11 +1112,11 @@ viona_ioc_delete(viona_soft_state_t *ss, boolean_t on_close)
 	ss->ss_link = NULL;
 	mutex_exit(&ss->ss_lock);
 
-	mutex_enter(&nsd->vipnd_lock);
-	list_remove(&nsd->vipnd_dev_list, ss);
-	mutex_exit(&nsd->vipnd_lock);
+	mutex_enter(&nip->vni_lock);
+	list_remove(&nip->vni_dev_list, ss);
+	mutex_exit(&nip->vni_lock);
 
-	viona_nsd_rele(nsd);
+	viona_neti_rele(nip);
 
 	kmem_free(link, sizeof (viona_link_t));
 	return (0);
@@ -2158,8 +2166,8 @@ viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp, boolean_t loopback)
 	mblk_t *mpdrop = NULL, **mpdrop_prevp = &mpdrop;
 	const boolean_t do_merge =
 	    ((link->l_features & VIRTIO_NET_F_MRG_RXBUF) != 0);
-	const boolean_t hooked = link->l_nsd->vipnd_nhv4.vnh_hooked ||
-		link->l_nsd->vipnd_nhv6.vnh_hooked;
+	const boolean_t hooked = link->l_neti->vni_nhv4.vnh_hooked ||
+		link->l_neti->vni_nhv6.vnh_hooked;
 	size_t nrx = 0, ndrop = 0;
 
 	while (mp != NULL) {
@@ -2539,8 +2547,8 @@ viona_tx(viona_link_t *link, viona_vring_t *ring)
 	viona_desb_t		*dp = NULL;
 	mac_client_handle_t	link_mch = link->l_mch;
 	const struct virtio_net_hdr *hdr;
-	const boolean_t hooked = link->l_nsd->vipnd_nhv4.vnh_hooked ||
-	    link->l_nsd->vipnd_nhv6.vnh_hooked;
+	const boolean_t hooked = link->l_neti->vni_nhv4.vnh_hooked ||
+	    link->l_neti->vni_nhv6.vnh_hooked;
 
 	mp_head = mp_tail = NULL;
 
@@ -2684,7 +2692,7 @@ static int
 viona_hook(viona_link_t *link, viona_vring_t *ring, mblk_t **mpp, boolean_t out)
 {
 	const char *reason = NULL;
-	viona_pnsd_t *nsd = link->l_nsd;
+	viona_neti_t *nip = link->l_neti;
 	viona_nethook_t *vnh = NULL;
 	size_t offset, len, minlen;
 	uint8_t *dstp;
@@ -2718,12 +2726,12 @@ viona_hook(viona_link_t *link, viona_vring_t *ring, mblk_t **mpp, boolean_t out)
 	 */
 	switch (etype) {
 	case ETHERTYPE_IP:
-		vnh = &nsd->vipnd_nhv4;
+		vnh = &nip->vni_nhv4;
 		minlen = IP_SIMPLE_HDR_LENGTH;
 		reason = "packet has incomplete IP header";
 		break;
 	case ETHERTYPE_IPV6:
-		vnh = &nsd->vipnd_nhv6;
+		vnh = &nip->vni_nhv6;
 		minlen = IPV6_HDR_LEN;
 		reason = "packet has incomplete IPv6 header";
 		break;
@@ -2921,7 +2929,7 @@ static net_protocol_t viona_neti_v6 = {
 };
 
 static int
-viona_netinfo_init(netid_t nid, viona_nethook_t *vnh, char *nh_name,
+viona_nethook_init(netid_t nid, viona_nethook_t *vnh, char *nh_name,
     net_protocol_t *netip)
 {
 	/*
@@ -3009,7 +3017,7 @@ fail:
 }
 
 static void
-viona_netinfo_shutdown(viona_nethook_t *vnh)
+viona_nethook_shutdown(viona_nethook_t *vnh)
 {
 	VERIFY0(net_event_shutdown(vnh->vnh_neti, &vnh->vnh_event_out));
 	VERIFY0(net_event_shutdown(vnh->vnh_neti, &vnh->vnh_event_in));
@@ -3017,7 +3025,7 @@ viona_netinfo_shutdown(viona_nethook_t *vnh)
 }
 
 static void
-viona_netinfo_fini(viona_nethook_t *vnh)
+viona_nethook_fini(viona_nethook_t *vnh)
 {
 	VERIFY0(net_event_unregister(vnh->vnh_neti, &vnh->vnh_event_out));
 	VERIFY0(net_event_unregister(vnh->vnh_neti, &vnh->vnh_event_in));
@@ -3027,102 +3035,111 @@ viona_netinfo_fini(viona_nethook_t *vnh)
 }
 
 static void *
-viona_stack_init(netstackid_t stackid, netstack_t *ns __unused)
+viona_neti_create(const netid_t netid)
 {
-	viona_pnsd_t *nsp;
-	netid_t nid;
+	viona_neti_t *nip;
 
-	nsp = kmem_zalloc(sizeof (*nsp), KM_SLEEP);
-	nsp->vipnd_nsid = stackid;
-	nsp->vipnd_zid = netstackid_to_zoneid(stackid);
-	nsp->vipnd_flags = 0;
-	mutex_init(&nsp->vipnd_lock, NULL, MUTEX_DRIVER, NULL);
-	list_create(&nsp->vipnd_dev_list, sizeof (viona_soft_state_t),
+	VERIFY(netid != -1);
+
+	nip = kmem_zalloc(sizeof (*nip), KM_SLEEP);
+	nip->vni_netid = netid;
+	nip->vni_zid = net_getzoneidbynetid(netid);
+	mutex_init(&nip->vni_lock, NULL, MUTEX_DRIVER, NULL);
+	list_create(&nip->vni_dev_list, sizeof (viona_soft_state_t),
 	    offsetof(viona_soft_state_t, ss_node));
 
-	nid = net_getnetidbynetstackid(stackid);
-	VERIFY(nid != -1);
-
-	if (viona_netinfo_init(nid, &nsp->vipnd_nhv4, "viona_inet",
+	if (viona_nethook_init(netid, &nip->vni_nhv4, Hn_VIONA,
 	    &viona_neti_v4) == 0)
-		nsp->vipnd_nhv4.vnh_hooked = B_TRUE;
+		nip->vni_nhv4.vnh_hooked = B_TRUE;
 
-	if (viona_netinfo_init(nid, &nsp->vipnd_nhv6, "viona_inet6",
+	if (viona_nethook_init(netid, &nip->vni_nhv6, Hn_VIONA6,
 	    &viona_neti_v6) == 0)
-		nsp->vipnd_nhv6.vnh_hooked = B_TRUE;
+		nip->vni_nhv6.vnh_hooked = B_TRUE;
 
-	mutex_enter(&viona_nsd_lock);
-	list_insert_tail(&viona_nsd_list, nsp);
-	mutex_exit(&viona_nsd_lock);
+	mutex_enter(&viona_neti_lock);
+	list_insert_tail(&viona_neti_list, nip);
+	mutex_exit(&viona_neti_lock);
 
-	return (nsp);
+	return (nip);
+}
+
+/*
+ * Called during netinst teardown.  Based on the netinst code, other consumers,
+ * the intention is that the shutdown callback quiesces everything and
+ * prepares it for destruction (and should always be called prior to the
+ * shutdown callback).
+ */
+static void
+viona_neti_shutdown(netid_t nid, void *arg)
+{
+	viona_neti_t *nip = arg;
+
+	ASSERT(nip != NULL);
+	VERIFY(nid == nip->vni_netid);
+
+	mutex_enter(&viona_neti_lock);
+	list_remove(&viona_neti_list, nip);
+	mutex_exit(&viona_neti_lock);
+
+	if (nip->vni_nhv4.vnh_hooked)
+		viona_nethook_shutdown(&nip->vni_nhv4);
+	if (nip->vni_nhv6.vnh_hooked)
+		viona_nethook_shutdown(&nip->vni_nhv6);
 }
 
 static void
-viona_stack_shutdown(netstackid_t stackid __unused, void *arg)
+viona_neti_destroy(netid_t nid, void *arg)
 {
-	viona_pnsd_t *nsp = arg;
+	viona_neti_t *nip = arg;
 
-	ASSERT(nsp != NULL);
+	ASSERT(nip != NULL);
+	VERIFY(nid == nip->vni_netid);
 
-	mutex_enter(&viona_nsd_lock);
-	list_remove(&viona_nsd_list, nsp);
-	mutex_exit(&viona_nsd_lock);
+	mutex_enter(&nip->vni_lock);
+	while (nip->vni_ref != 0)
+		cv_wait(&nip->vni_ref_change, &nip->vni_lock);
+	mutex_exit(&nip->vni_lock);
 
-	if (nsp->vipnd_nhv4.vnh_hooked)
-		viona_netinfo_shutdown(&nsp->vipnd_nhv4);
-	if (nsp->vipnd_nhv6.vnh_hooked)
-		viona_netinfo_shutdown(&nsp->vipnd_nhv6);
+	VERIFY(!list_link_active(&nip->vni_node));
+
+	if (nip->vni_nhv4.vnh_hooked)
+		viona_nethook_fini(&nip->vni_nhv4);
+	if (nip->vni_nhv6.vnh_hooked)
+		viona_nethook_fini(&nip->vni_nhv6);
+
+	mutex_destroy(&nip->vni_lock);
+	list_destroy(&nip->vni_dev_list);
+	kmem_free(nip, sizeof (*nip));
+}
+
+static viona_neti_t *
+viona_neti_lookup_by_zid(zoneid_t zid)
+{
+	viona_neti_t *nip;
+
+	mutex_enter(&viona_neti_lock);
+	for (nip = list_head(&viona_neti_list); nip != NULL;
+	    nip = list_next(&viona_neti_list, nip)) {
+		mutex_enter(&nip->vni_lock);
+		if (nip->vni_zid == zid) {
+			nip->vni_ref++;
+			mutex_exit(&nip->vni_lock);
+			mutex_exit(&viona_neti_lock);
+			return (nip);
+		}
+		mutex_exit(&nip->vni_lock);
+	}
+	mutex_exit(&viona_neti_lock);
+	return (NULL);
 }
 
 static void
-viona_stack_destroy(netstackid_t stackid __unused, void *arg)
+viona_neti_rele(viona_neti_t *nip)
 {
-	viona_pnsd_t *nsp = arg;
-
-	ASSERT(nsp != NULL);
-
-	mutex_enter(&nsp->vipnd_lock);
-	while (nsp->vipnd_ref != 0)
-		cv_wait(&nsp->vipnd_ref_change, &nsp->vipnd_lock);
-	mutex_exit(&nsp->vipnd_lock);
-
-	if (nsp->vipnd_nhv4.vnh_hooked)
-		viona_netinfo_fini(&nsp->vipnd_nhv4);
-	if (nsp->vipnd_nhv6.vnh_hooked)
-		viona_netinfo_fini(&nsp->vipnd_nhv6);
-
-	mutex_destroy(&nsp->vipnd_lock);
-	list_destroy(&nsp->vipnd_dev_list);
-	kmem_free(nsp, sizeof (*nsp));
-}
-
-static viona_pnsd_t *
-viona_nsd_lookup_by_zid(zoneid_t zid)
-{
-	netstack_t *ns;
-	viona_pnsd_t *nsp;
-
-	ns = netstack_find_by_zoneid(zid);
-	if (ns == NULL)
-		return (NULL);
-
-	nsp = ns->netstack_viona;
-	mutex_enter(&nsp->vipnd_lock);
-	nsp->vipnd_ref++;
-	mutex_exit(&nsp->vipnd_lock);
-
-	netstack_rele(ns);
-	return (nsp);
-}
-
-static void
-viona_nsd_rele(viona_pnsd_t *nsp)
-{
-	mutex_enter(&nsp->vipnd_lock);
-	VERIFY3S(nsp->vipnd_ref, >, 0);
-	nsp->vipnd_ref--;
-	mutex_exit(&nsp->vipnd_lock);
-	cv_broadcast(&nsp->vipnd_ref_change);
+	mutex_enter(&nip->vni_lock);
+	VERIFY3S(nip->vni_ref, >, 0);
+	nip->vni_ref--;
+	mutex_exit(&nip->vni_lock);
+	cv_broadcast(&nip->vni_ref_change);
 }
 

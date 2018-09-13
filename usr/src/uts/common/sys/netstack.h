@@ -25,7 +25,7 @@
  */
 
 /*
- * Copyright (c) 2018, Joyent, Inc. All rights reserved.
+ * Copyright (c) 2017, Joyent, Inc. All rights reserved.
  */
 
 #ifndef _SYS_NETSTACK_H
@@ -89,8 +89,7 @@ typedef id_t	netstackid_t;
 #define	NS_IPNET	17
 #define	NS_ILB		18
 #define	NS_VND		19
-#define	NS_VIONA	20
-#define	NS_MAX		(NS_VIONA+1)
+#define	NS_MAX		(NS_VND+1)
 
 /*
  * State maintained for each module which tracks the state of
@@ -166,8 +165,6 @@ struct netstack {
 			struct ipsecesp_stack	*nu_ipsecesp;
 			struct ipnet_stack	*nu_ipnet;
 			struct ilb_stack	*nu_ilb;
-			struct vnd_pnsd		*nu_vnd;
-			struct viona_pnsd	*nu_viona;
 		} nu_s;
 	} netstack_u;
 #define	netstack_modules	netstack_u.nu_modules
@@ -190,8 +187,6 @@ struct netstack {
 #define	netstack_ipsecesp	netstack_u.nu_s.nu_ipsecesp
 #define	netstack_ipnet		netstack_u.nu_s.nu_ipnet
 #define	netstack_ilb		netstack_u.nu_s.nu_ilb
-#define	netstack_vnd		netstack_u.nu_s.nu_vnd
-#define	netstack_viona		netstack_u.nu_s.nu_viona
 
 	nm_state_t	netstack_m_state[NS_MAX]; /* module state */
 
