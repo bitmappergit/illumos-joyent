@@ -103,10 +103,10 @@ static	int	ipf_hookvional3v6_out __P((hook_event_token_t, hook_data_t,
 extern	int	ipf_geniter __P((ipftoken_t *, ipfgeniter_t *, ipf_stack_t *));
 extern	int	ipf_frruleiter __P((void *, int, void *, ipf_stack_t *));
 
-static int ipf_hook_protocol_notify(hook_notify_cmd_t, void *, const char *,
-    const char *, const char *);
-static int ipf_hook_instance_notify(hook_notify_cmd_t, void *, const char *,
-    const char *, const char *);
+static int	ipf_hook_protocol_notify __P((hook_notify_cmd_t, void *,
+    const char *, const char *, const char *));
+static int	ipf_hook_instance_notify __P((hook_notify_cmd_t, void *,
+    const char *, const char *, const char *));
 
 #if SOLARIS2 < 10
 #if SOLARIS2 >= 7
@@ -126,7 +126,7 @@ u_long		*ip_forwarding = NULL;
 #endif
 
 vmem_t	*ipf_minor;	/* minor number arena */
-void 	*ipf_state;	/* DDI state */
+void	*ipf_state;	/* DDI state */
 
 /*
  * GZ-controlled and per-zone stacks:
@@ -151,28 +151,28 @@ void 	*ipf_state;	/* DDI state */
  */
 
 /* IPv4 hook names */
-char *hook4_nicevents = 	"ipfilter_hook4_nicevents";
-char *hook4_nicevents_gz = 	"ipfilter_hook4_nicevents_gz";
-char *hook4_in = 		"ipfilter_hook4_in";
-char *hook4_in_gz = 		"ipfilter_hook4_in_gz";
-char *hook4_out = 		"ipfilter_hook4_out";
-char *hook4_out_gz = 		"ipfilter_hook4_out_gz";
-char *hook4_loop_in = 		"ipfilter_hook4_loop_in";
-char *hook4_loop_in_gz = 	"ipfilter_hook4_loop_in_gz";
-char *hook4_loop_out = 		"ipfilter_hook4_loop_out";
-char *hook4_loop_out_gz = 	"ipfilter_hook4_loop_out_gz";
+char *hook4_nicevents =		"ipfilter_hook4_nicevents";
+char *hook4_nicevents_gz =	"ipfilter_hook4_nicevents_gz";
+char *hook4_in =		"ipfilter_hook4_in";
+char *hook4_in_gz =		"ipfilter_hook4_in_gz";
+char *hook4_out =		"ipfilter_hook4_out";
+char *hook4_out_gz =		"ipfilter_hook4_out_gz";
+char *hook4_loop_in =		"ipfilter_hook4_loop_in";
+char *hook4_loop_in_gz =	"ipfilter_hook4_loop_in_gz";
+char *hook4_loop_out =		"ipfilter_hook4_loop_out";
+char *hook4_loop_out_gz =	"ipfilter_hook4_loop_out_gz";
 
 /* IPv6 hook names */
-char *hook6_nicevents = 	"ipfilter_hook6_nicevents";
-char *hook6_nicevents_gz = 	"ipfilter_hook6_nicevents_gz";
-char *hook6_in = 		"ipfilter_hook6_in";
-char *hook6_in_gz = 		"ipfilter_hook6_in_gz";
-char *hook6_out = 		"ipfilter_hook6_out";
-char *hook6_out_gz = 		"ipfilter_hook6_out_gz";
-char *hook6_loop_in = 		"ipfilter_hook6_loop_in";
-char *hook6_loop_in_gz = 	"ipfilter_hook6_loop_in_gz";
-char *hook6_loop_out = 		"ipfilter_hook6_loop_out";
-char *hook6_loop_out_gz = 	"ipfilter_hook6_loop_out_gz";
+char *hook6_nicevents =		"ipfilter_hook6_nicevents";
+char *hook6_nicevents_gz =	"ipfilter_hook6_nicevents_gz";
+char *hook6_in =		"ipfilter_hook6_in";
+char *hook6_in_gz =		"ipfilter_hook6_in_gz";
+char *hook6_out =		"ipfilter_hook6_out";
+char *hook6_out_gz =		"ipfilter_hook6_out_gz";
+char *hook6_loop_in =		"ipfilter_hook6_loop_in";
+char *hook6_loop_in_gz =	"ipfilter_hook6_loop_in_gz";
+char *hook6_loop_out =		"ipfilter_hook6_loop_out";
+char *hook6_loop_out_gz =	"ipfilter_hook6_loop_out_gz";
 
 /* vnd IPv4/v6 hook names */
 char *hook4_vnd_in =		"ipfilter_hookvndl3v4_in";
@@ -208,6 +208,7 @@ char *hook6_viona_out_gz =	"ipfilter_hookvional3v6_out_gz";
 int ipldetach(ifs)
 ipf_stack_t *ifs;
 {
+
 	ASSERT(RW_WRITE_HELD(&ifs->ifs_ipf_global.ipf_lk));
 
 #if SOLARIS2 < 10
@@ -319,6 +320,7 @@ ipf_stack_t *ifs;
 	 */
 	net_instance_notify_unregister(ifs->ifs_netid,
 	    ipf_hook_instance_notify);
+#undef UNDO_HOOK
 
 	/*
 	 * Normally, viona will unregister itself before ipldetach() is called,
@@ -652,21 +654,6 @@ hookup_failed:
 	return -1;
 }
 
-static const char *
-hook_cmd_str(hook_notify_cmd_t command)
-{
-	switch (command) {
-	case HN_NONE:
-		return ("HN_NONE");
-	case HN_REGISTER:
-		return ("HN_REGISTER");
-	case HN_UNREGISTER:
-		return ("HN_UNREGISTER");
-	default:
-		return ("UNKNOWN");
-	}
-}
-
 /* ------------------------------------------------------------------------ */
 /*
  * Called whenever a nethook protocol is registered or unregistered.  Currently
@@ -693,11 +680,6 @@ ipf_hook_protocol_notify(hook_notify_cmd_t command, void *arg,
 	hook_hint_t hint;
 	boolean_t v6, out;
 	int ret = 0;
-
-	cmn_err(CE_NOTE, "%s: command=%s (%d) name=%s he_name=%s ipf_stack=%d%s",
-	    __func__, hook_cmd_str(command), command, name,
-	    he_name, ifs->ifs_netid,
-	    ifs->ifs_gz_controlled ? " (GZ)" : "");
 
 	const boolean_t gz = ifs->ifs_gz_controlled;
 
@@ -805,7 +787,7 @@ ipf_hook_protocol_notify(hook_notify_cmd_t command, void *arg,
  * not applicable) or a non-zero value on error.
  */
 static int
-ipf_hook_instance_notify(hook_notify_cmd_t command, void *arg __unused,
+ipf_hook_instance_notify(hook_notify_cmd_t command, void *arg,
     const char *netid, const char *dummy __unused, const char *instance)
 {
 	ipf_stack_t *ifs = arg;
@@ -813,9 +795,6 @@ ipf_hook_instance_notify(hook_notify_cmd_t command, void *arg __unused,
 	const char *nhf_name;
 	boolean_t v6;
 	int ret;
-
-	cmn_err(CE_NOTE, "%s: command=%s (%d) netid=%s instance=%s", __func__,
-	    hook_cmd_str(command), command, netid, instance);
 
 	if (strcmp(instance, Hn_VIONA) == 0) {
 		v6 = B_FALSE;
@@ -1276,13 +1255,13 @@ int v;
 ipf_stack_t *ifs;
 {
 	net_handle_t nif;
- 
-  	if (v == 4)
- 		nif = ifs->ifs_ipf_ipv4;
-  	else if (v == 6)
- 		nif = ifs->ifs_ipf_ipv6;
-  	else
- 		return 0;
+
+	if (v == 4)
+		nif = ifs->ifs_ipf_ipv4;
+	else if (v == 6)
+		nif = ifs->ifs_ipf_ipv6;
+	else
+		return 0;
 
  	return (net_phylookup(nif, name));
 }
@@ -1541,7 +1520,7 @@ fr_info_t *fin;
  *	fin: packet information
  *	m: the message block where ip head starts
  *
- * Send a new packet through the IP stack. 
+ * Send a new packet through the IP stack.
  *
  * For IPv4 packets, ip_len must be in host byte order, and ip_v,
  * ip_ttl, ip_off, and ip_sum are ignored (filled in by this
@@ -1709,8 +1688,8 @@ int dst;
 	icmp = (struct icmp *)(m->b_rptr + hlen);
 	icmp->icmp_type = type & 0xff;
 	icmp->icmp_code = code & 0xff;
-	phy = (phy_if_t)qpi->qpi_ill; 
-	if (type == ICMP_UNREACH && (phy != 0) && 
+	phy = (phy_if_t)qpi->qpi_ill;
+	if (type == ICMP_UNREACH && (phy != 0) &&
 	    fin->fin_icode == ICMP_UNREACH_NEEDFRAG)
 		icmp->icmp_nextmtu = net_getmtu(ifs->ifs_ipf_ipv4, phy,0 );
 
@@ -2126,12 +2105,12 @@ fr_info_t *fin;
 	struct sockaddr	sin;
 	ipf_stack_t *ifs = fin->fin_ifs;
 
-	if (fin->fin_v == 4) { 
+	if (fin->fin_v == 4) {
 		net_data_p = ifs->ifs_ipf_ipv4;
-	} else if (fin->fin_v == 6) { 
+	} else if (fin->fin_v == 6) {
 		net_data_p = ifs->ifs_ipf_ipv6;
-	} else { 
-		return (0); 
+	} else {
+		return (0);
 	}
 
 	/* Get the index corresponding to the if name */
@@ -2139,7 +2118,7 @@ fr_info_t *fin;
 	bcopy(&fin->fin_saddr, &sin.sa_data, sizeof (struct in_addr));
 	phy_ifdata_routeto = net_routeto(net_data_p, &sin, NULL);
 
-	return (((phy_if_t)fin->fin_ifp == phy_ifdata_routeto) ? 1 : 0); 
+	return (((phy_if_t)fin->fin_ifp == phy_ifdata_routeto) ? 1 : 0);
 }
 
 /*
@@ -2513,7 +2492,7 @@ int ipf_hook(hook_data_t info, int out, int loopback, void *arg)
 	qpktinfo_t qpi;
 	int rval, hlen;
 	u_short swap;
-	phy_if_t phy; 
+	phy_if_t phy;
 	ip_t *ip;
 
 	ifs = arg;
@@ -2563,7 +2542,7 @@ int ipf_hook6(hook_data_t info, int out, int loopback, void *arg)
 	hook_pkt_event_t *fw;
 	int rval, hlen;
 	qpktinfo_t qpi;
-	phy_if_t phy; 
+	phy_if_t phy;
 
 	fw = (hook_pkt_event_t *)info;
 
@@ -2819,7 +2798,7 @@ fr_info_t *fin;
 #ifdef USE_INET6
 	struct in6_addr	tmp_src6;
 #endif
-	
+
 	ASSERT(fin->fin_p == IPPROTO_TCP);
 
 	/*
@@ -2861,7 +2840,7 @@ fr_info_t *fin;
 #endif
 
 	if (tcp != NULL) {
-		/* 
+		/*
 		 * Adjust TCP header:
 		 *	swap ports,
 		 *	set flags,
@@ -2930,7 +2909,7 @@ fr_info_t *fin;
 	 */
 	tcp = (tcphdr_t *) fin->fin_dp;
 
-	if ((fin->fin_p == IPPROTO_TCP) && 
+	if ((fin->fin_p == IPPROTO_TCP) &&
 	    ((tcp == NULL) || ((tcp->th_flags & (TH_SYN | TH_FIN)) == 0)))
 		return (-1);
 
@@ -3052,7 +3031,7 @@ fr_info_t *fin;
 	 */
 	sum = (sum >> 16) + (sum & 0xffff);
 	sum += (sum >> 16);
-	icmp->icmp_cksum = ~sum; 
+	icmp->icmp_cksum = ~sum;
 
 	/*
 	 * Step (6)
@@ -3117,7 +3096,7 @@ fr_info_t *fin;
 	 */
 	tcp = (tcphdr_t *) fin->fin_dp;
 
-	if ((fin->fin_p == IPPROTO_TCP) && 
+	if ((fin->fin_p == IPPROTO_TCP) &&
 	    ((tcp == NULL) || ((tcp->th_flags & (TH_SYN | TH_FIN)) == 0)))
 		return (-1);
 
@@ -3143,14 +3122,14 @@ fr_info_t *fin;
 
 	if (mblk_icmp == NULL)
 		return (-1);
-	
+
 	MTYPE(mblk_icmp) = M_DATA;
 	icmp6 =  (struct icmp6_hdr *) mblk_icmp->b_wptr;
 	icmp6->icmp6_type = ICMP6_DST_UNREACH;
 	icmp6->icmp6_code = fin->fin_icode & 0xFF;
 	icmp6->icmp6_data32[0] = 0;
 	mblk_icmp->b_wptr += sizeof (struct icmp6_hdr);
-	
+
 	/*
 	 * Step (3)
 	 *
@@ -3158,7 +3137,7 @@ fr_info_t *fin;
 	 */
 	linkb(mblk_icmp, mblk_ip);
 
-	/* 
+	/*
 	 * Step (4)
 	 *
 	 * Calculate chksum - this is much more easier task than in case of
@@ -3260,7 +3239,7 @@ int fr_make_icmp(fin)
 fr_info_t *fin;
 {
 	int rv;
-	
+
 	if (fin->fin_v == 4)
 		rv = fr_make_icmp_v4(fin);
 #ifdef USE_INET6

@@ -207,6 +207,23 @@
  * slow path for interrupts.  It will poll(2) the viona handle, receiving
  * notification when ring events necessitate the assertion of an interrupt.
  *
+ *
+ * ---------------
+ * Nethook Support
+ * ---------------
+ *
+ * Viona provides four nethook events that consumers (e.g. ipf) can hook into
+ * to intercept packets as they go up or down the stack.  Unfortunately,
+ * the nethook framework does not understand raw packets, so we can only
+ * generate events (in, out) for IPv4 and IPv6 packets.  At driver attach,
+ * we register callbacks with the neti (netinfo) module that will be invoked
+ * for each netstack already present, as well as for any additional netstack
+ * instances created as the system operates.  These callbacks will
+ * register/unregister the hooks with the nethook framework for each
+ * netstack instance.  This registration occurs prior to creating any
+ * viona instances for a given netstack, and the unregistration for a netstack
+ * instance occurs after all viona instances of the netstack instance have
+ * been deleted.
  */
 
 #include <sys/conf.h>
@@ -723,6 +740,7 @@ viona_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	list_create(&viona_neti_list, sizeof (viona_neti_t),
 	    offsetof(viona_neti_t, vni_node));
 
+	/* This can only fail if NETINFO_VERSION is wrong */
 	viona_neti = net_instance_alloc(NETINFO_VERSION);
 	VERIFY(viona_neti != NULL);
 
@@ -730,6 +748,7 @@ viona_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	viona_neti->nin_create = viona_neti_create;
 	viona_neti->nin_shutdown = viona_neti_shutdown;
 	viona_neti->nin_destroy = viona_neti_destroy;
+	/* This can only failed if we've registered outselves multiple times */
 	VERIFY3S(net_instance_register(viona_neti), ==, DDI_SUCCESS);
 
 	return (DDI_SUCCESS);
@@ -754,7 +773,8 @@ viona_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	ddi_remove_minor_node(viona_dip, NULL);
 	viona_dip = NULL;
 
-	net_instance_unregister(viona_neti);
+	/* This can only fail if we've not registered previously */
+	VERIFY3S(net_instance_unregister(viona_neti), ==, DDI_SUCCESS);
 	net_instance_free(viona_neti);
 	viona_neti = NULL;
 
@@ -977,6 +997,11 @@ viona_ioc_create(viona_soft_state_t *ss, void *dptr, int md, cred_t *cr)
 	zid = crgetzoneid(cr);
 	nip = viona_neti_lookup_by_zid(zid);
 	if (nip == NULL) {
+		return (EIO);
+	}
+
+	if (!nip->vni_nhv4.vnh_hooked || !nip->vni_nhv6.vnh_hooked) {
+		viona_neti_rele(nip);
 		return (EIO);
 	}
 
@@ -2167,7 +2192,7 @@ viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp, boolean_t loopback)
 	const boolean_t do_merge =
 	    ((link->l_features & VIRTIO_NET_F_MRG_RXBUF) != 0);
 	const boolean_t hooked = link->l_neti->vni_nhv4.vnh_hooked ||
-		link->l_neti->vni_nhv6.vnh_hooked;
+	    link->l_neti->vni_nhv6.vnh_hooked;
 	size_t nrx = 0, ndrop = 0;
 
 	while (mp != NULL) {
@@ -2688,6 +2713,13 @@ drop_fail:
 	viona_tx_done(ring, len, cookie);
 }
 
+/*
+ * Generate a hook event for the packet in *mpp headed in the direction
+ * indicated by 'out'.  If the packet is accepted, 0 is returned.  If the
+ * packet is rejected, an error is returned.  The hook function may or may not
+ * alter or even free *mpp.  The caller is expected to deal with either
+ * situation.
+ */
 static int
 viona_hook(viona_link_t *link, viona_vring_t *ring, mblk_t **mpp, boolean_t out)
 {
@@ -2700,6 +2732,7 @@ viona_hook(viona_link_t *link, viona_vring_t *ring, mblk_t **mpp, boolean_t out)
 	hook_pkt_event_t info;
 	hook_event_t he;
 	hook_event_token_t het;
+	int ret;
 	uint16_t etype;
 
 	/* Byte 12 is either the VLAN tag or the ethertype */
@@ -2721,7 +2754,7 @@ viona_hook(viona_link_t *link, viona_vring_t *ring, mblk_t **mpp, boolean_t out)
 	len = msgsize(*mpp) - offset;
 
 	/*
-	 * At the moment, we only hook on the kidns of things that the IP
+	 * At the moment, we only hook on the kinds of things that the IP
 	 * module would normally.
 	 */
 	switch (etype) {
@@ -2776,7 +2809,8 @@ viona_hook(viona_link_t *link, viona_vring_t *ring, mblk_t **mpp, boolean_t out)
 		goto drop;
 	}
 
-	if (hook_run(vnh->vnh_neti->netd_hooks, het, (hook_data_t)&info) != 0) {
+	ret = hook_run(vnh->vnh_neti->netd_hooks, het, (hook_data_t)&info);
+	if (ret != 0) {
 		if (out) {
 			VIONA_PROBE2(tx_hook_drop, viona_vring_t *, ring,
 			    mblk_t *, *mpp);
@@ -2786,8 +2820,7 @@ viona_hook(viona_link_t *link, viona_vring_t *ring, mblk_t **mpp, boolean_t out)
 			    mblk_t *, *mpp);
 			VIONA_RING_STAT_INCR(ring, rx_hookdrop);
 		}
-		/* This seems like the closest (in meaning) error value */
-		return (EPERM);
+		return (ret);
 	}
 	return (0);
 
@@ -2805,6 +2838,7 @@ drop:
 	return (EBADMSG);
 }
 
+/* netinfo stubs - required by the nethook framework, but otherwise unused */
 static int
 viona_neti_getifname(net_handle_t neti __unused, phy_if_t phy __unused,
     char *buf __unused, const size_t len __unused)
@@ -2928,6 +2962,10 @@ static net_protocol_t viona_neti_v6 = {
 	viona_neti_isvchksum
 };
 
+/*
+ * Create/register a nethooks (in, out) for a given protocol (netip) (e.g.
+ * IPv4, IPv6).
+ */
 static int
 viona_nethook_init(netid_t nid, viona_nethook_t *vnh, char *nh_name,
     net_protocol_t *netip)
@@ -3016,6 +3054,12 @@ fail:
 	return (1);
 }
 
+/*
+ * Shutdown the nethooks for a protocol family.  This triggers notification
+ * callbacks to anything that has registered interest to allow hook consumers
+ * to unhook prior to the removal of the hooks as well as makes them unavailable
+ * to any future consumers as the first step of removal.
+ */
 static void
 viona_nethook_shutdown(viona_nethook_t *vnh)
 {
@@ -3024,6 +3068,9 @@ viona_nethook_shutdown(viona_nethook_t *vnh)
 	VERIFY0(net_family_shutdown(vnh->vnh_neti, &vnh->vnh_family));
 }
 
+/*
+ * Remove the nethooks for a protocol family.
+ */
 static void
 viona_nethook_fini(viona_nethook_t *vnh)
 {
@@ -3034,6 +3081,23 @@ viona_nethook_fini(viona_nethook_t *vnh)
 	vnh->vnh_neti = NULL;
 }
 
+/*
+ * Callback invoked by the neti module.  This creates/registers our hooks
+ * {IPv4,IPv6}{in,out} with the nethook framework so they are available to
+ * interested consumers (e.g. ipf).
+ *
+ * During attach, viona_neti_create is called once for every netstack
+ * present on the system at the time of attach.  Thereafter, it is called
+ * during the creation of additional netstack instances (i.e. zone boot).  As a
+ * result, the viona_neti_t that is created during this call always occurs
+ * prior to any viona instances that will use it to send hook events.
+ *
+ * It should never return NULL.  If we cannot register our hooks, we do not
+ * set vnh_hooked of the respective protocol family, which will prevent the
+ * creation of any viona instances on this netstack (see viona_ioc_create).
+ * This can only occur if after a shutdown event (which means destruction is
+ * imminent) we are trying to create a new instance.
+ */
 static void *
 viona_neti_create(const netid_t netid)
 {
@@ -3064,10 +3128,10 @@ viona_neti_create(const netid_t netid)
 }
 
 /*
- * Called during netinst teardown.  Based on the netinst code, other consumers,
- * the intention is that the shutdown callback quiesces everything and
- * prepares it for destruction (and should always be called prior to the
- * shutdown callback).
+ * Called during netstack teardown by the neti module.  During teardown, all
+ * the shutdown callbacks are invoked, allowing consumers to release any holds
+ * and otherwise quiesce themselves prior to destruction, followed by the
+ * actual destruction callbacks.
  */
 static void
 viona_neti_shutdown(netid_t nid, void *arg)
@@ -3087,6 +3151,11 @@ viona_neti_shutdown(netid_t nid, void *arg)
 		viona_nethook_shutdown(&nip->vni_nhv6);
 }
 
+/*
+ * Called during netstack teardown by the neti module.  Destroys the viona
+ * netinst data.  This is invoked after all the netstack and neti shutdown
+ * callbacks have been invoked.
+ */
 static void
 viona_neti_destroy(netid_t nid, void *arg)
 {
@@ -3112,6 +3181,10 @@ viona_neti_destroy(netid_t nid, void *arg)
 	kmem_free(nip, sizeof (*nip));
 }
 
+/*
+ * Find the viona netinst data by zone id.  This is only used during
+ * viona instance creation (and thus is only called by a zone is running).
+ */
 static viona_neti_t *
 viona_neti_lookup_by_zid(zoneid_t zid)
 {
@@ -3142,4 +3215,3 @@ viona_neti_rele(viona_neti_t *nip)
 	mutex_exit(&nip->vni_lock);
 	cv_broadcast(&nip->vni_ref_change);
 }
-

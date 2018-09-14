@@ -67,7 +67,7 @@ struct msgb;	/* avoiding sys/stream.h here */
 /*
  * Network NIC hardware checksum capability
  */
-#define	NET_HCK_NONE   	0x00
+#define	NET_HCK_NONE	0x00
 #define	NET_HCK_L3_FULL	0x01
 #define	NET_HCK_L3_PART	0x02
 #define	NET_HCK_L4_FULL	0x10

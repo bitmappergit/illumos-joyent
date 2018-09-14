@@ -87,8 +87,8 @@ struct ipf_stack {
 #endif
 	int			ifs_ipf_locks_done;
 
-	ipftoken_t 		*ifs_ipftokenhead;
-	ipftoken_t 		**ifs_ipftokentail;
+	ipftoken_t		*ifs_ipftokenhead;
+	ipftoken_t		**ifs_ipftokentail;
 
 	ipfmutex_t	ifs_ipl_mutex;
 	ipfmutex_t	ifs_ipf_authmx;
@@ -189,8 +189,8 @@ struct ipf_stack {
 	ipfr_t			**ifs_ipfr_nattail;
 	ipfr_t			**ifs_ipfr_nattab;
 
-	ipfr_t  		*ifs_ipfr_ipidlist;
-	ipfr_t  		**ifs_ipfr_ipidtail;
+	ipfr_t			*ifs_ipfr_ipidlist;
+	ipfr_t			**ifs_ipfr_ipidtail;
 	ipfr_t			**ifs_ipfr_ipidtab;
 
 	ipfrstat_t		ifs_ipfr_stats;

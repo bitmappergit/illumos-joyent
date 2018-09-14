@@ -1126,7 +1126,7 @@ hook_family_copy(hook_family_t *src)
  * Parameters:	family(I) - family name string
  *
  * Search family list with family name
- * 	A lock on hfi_lock must be held when called.
+ *	A lock on hfi_lock must be held when called.
  */
 static hook_family_int_t *
 hook_family_find(char *family, hook_stack_t *hks)
@@ -1651,7 +1651,7 @@ hook_event_copy(hook_event_t *src)
  *		event(I) - event name string
  *
  * Search event list with event name
- * 	A lock on hfi->hfi_lock must be held when called.
+ *	A lock on hfi->hfi_lock must be held when called.
  */
 static hook_event_int_t *
 hook_event_find(hook_family_int_t *hfi, char *event)
